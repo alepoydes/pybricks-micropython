@@ -7,6 +7,9 @@ Pybricks firmware metadata file generation tool.
 
 Generates a .json file with information about a Pybricks firmware binary blob.
 
+Use --no-custom-name for images without a patchable hub name. If the platform
+also needs no checksum, the linker map is not inspected for Pybricks sections.
+
 The manifest carries the shared identity of the firmware at the top level and one
 or more architecture variants under the "variants" key. Each variant corresponds to
 a pbio platform (e.g. prime_hub_f4, prime_hub_h5) of the same product. Example::
@@ -114,6 +117,7 @@ def generate(
     map_file: io.FileIO,
     out_file: io.FileIO,
     elf_file: io.FileIO = None,
+    customize_name: bool = True,
 ):
     if platform not in PLATFORM_INFO:
         print("Unknown platform", file=sys.stderr)
@@ -135,8 +139,10 @@ def generate(
         "checksum-type": platform_info["checksum-type"],
     }
 
-    if device_id == 0xE0:
-        # Not supported. Setting to 0 ignores name on flashing.
+    if device_id == 0xE0 or (
+        not customize_name and platform_info["checksum-type"] == "none"
+    ):
+        # No image patching is needed. Setting to 0 ignores name on flashing.
         variant["checksum-size"] = 0
         variant["hub-name-offset"] = 0
         variant["hub-name-size"] = 0
@@ -205,12 +211,12 @@ def generate(
             print("Failed to find 'FLASH_FIRMWARE' length", file=sys.stderr)
             exit(1)
 
-        if name_start is None:
+        if customize_name and name_start is None:
             print("Failed to find '.name' start address", file=sys.stderr)
             exit(1)
 
-        variant["hub-name-offset"] = name_start - flash_origin
-        variant["hub-name-size"] = name_size
+        variant["hub-name-offset"] = name_start - flash_origin if customize_name else 0
+        variant["hub-name-size"] = name_size if customize_name else 0
 
         if device_id == 0xE1:
             # NXT firmware has no checksum or appended user program
@@ -259,6 +265,12 @@ if __name__ == "__main__":
         type=argparse.FileType("rb"),
         help="firmware ELF file embedded in the firmware image (EV3 only)",
     )
+    parser.add_argument(
+        "--no-custom-name",
+        action="store_false",
+        dest="customize_name",
+        help="generate metadata for firmware without a patchable hub name",
+    )
 
     args = parser.parse_args()
     generate(
@@ -267,4 +279,5 @@ if __name__ == "__main__":
         args.map_file,
         args.out_file,
         args.elf,
+        args.customize_name,
     )
