@@ -12,6 +12,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include <pbdrv/config.h>
 #include <pbio/config.h>
 #include <pbio/error.h>
 #include <pbio/os.h>
@@ -60,8 +61,6 @@ typedef enum {
     PBIO_BLUETOOTH_PERIPHERAL_OPTIONS_NONE = 0,
     /** Whether to initiate pairing after connecting. */
     PBIO_BLUETOOTH_PERIPHERAL_OPTIONS_PAIR = 1 << 0,
-    /** Whether to disconnect from the host before connecting to peripheral. */
-    PBIO_BLUETOOTH_PERIPHERAL_OPTIONS_DISCONNECT_HOST = 1 << 1,
 } pbio_bluetooth_peripheral_options_t;
 
 typedef struct _pbio_bluetooth_peripheral_t pbio_bluetooth_peripheral_t;
@@ -243,7 +242,7 @@ typedef struct {
     char name[PBIO_BLUETOOTH_CLASSIC_NAME_SIZE];
 } pbio_bluetooth_classic_link_key_t;
 
-#if PBIO_CONFIG_BLUETOOTH
+#if PBDRV_CONFIG_BLUETOOTH_LE
 
 //
 // General purpose functions: initialization and power/connected state.
@@ -455,82 +454,7 @@ pbio_error_t pbio_bluetooth_await_advertise_or_scan_command(pbio_os_state_t *sta
  */
 pbio_error_t pbio_bluetooth_close_user_tasks(pbio_os_state_t *state, pbio_os_timer_t *timer);
 
-/**
- * Registers the persisted bonding records, called by pbsys once on boot
- * after loading stored settings.
- *
- * @param [in]  records  Array of ::PBIO_BLUETOOTH_CLASSIC_NUM_BONDS records.
- */
-void pbio_bluetooth_classic_apply_loaded_link_keys(pbio_bluetooth_classic_link_key_t *records);
-
-/**
- * Gets the name of a registered device, for display purposes.
- *
- * @param [in]  bdaddr  Bluetooth address of the remote device (6 bytes).
- * @returns             The name, or NULL if the device is not registered.
- */
-const char *pbio_bluetooth_classic_link_key_get_name(const uint8_t *bdaddr);
-
-/**
- * Registers a provisional bonding record for a device about to be paired,
- * making it the most recently used one. Called by the Bluetooth stack driver
- * when pairing starts. If the pool is full, the least recently registered
- * device is forgotten.
- *
- * @param [in]  bdaddr  Bluetooth address of the remote device (6 bytes).
- * @param [in]  name    Device name.
- */
-void pbio_bluetooth_classic_link_key_register(const uint8_t *bdaddr, const char *name);
-
-/**
- * Forgets a bonding record entirely, e.g. when pairing was cancelled or
- * timed out. Unlike pbio_bluetooth_classic_link_key_delete(), this also drops
- * the user's registration, so no new key will be stored for the device.
- *
- * @param [in]  bdaddr  Bluetooth address of the remote device (6 bytes).
- */
-void pbio_bluetooth_classic_link_key_unregister(const uint8_t *bdaddr);
-
-/**
- * Gets the stored link key for a remote device, called by the Bluetooth
- * stack on (re)connect.
- *
- * @param [in]  bdaddr         Bluetooth address of the remote device (6 bytes).
- * @param [out] link_key       Buffer to receive the 16-byte link key.
- * @param [out] link_key_type  The stored link key type.
- * @returns                    True if a key was found, false otherwise.
- */
-bool pbio_bluetooth_classic_link_key_get(const uint8_t *bdaddr, uint8_t *link_key, uint16_t *link_key_type);
-
-/**
- * Stores the link key negotiated during pairing, called by the Bluetooth
- * stack. Only stored if the device was first registered by the user, which
- * fills the record with the address and name.
- *
- * @param [in]  bdaddr         Bluetooth address of the remote device (6 bytes).
- * @param [in]  link_key       The 16-byte link key.
- * @param [in]  link_key_type  The link key type.
- */
-void pbio_bluetooth_classic_link_key_put(const uint8_t *bdaddr, const uint8_t *link_key, uint16_t link_key_type);
-
-/**
- * Deletes the stored link key for a remote device (e.g. when it turned
- * stale), keeping the user's device registration.
- *
- * @param [in]  bdaddr  Bluetooth address of the remote device (6 bytes).
- */
-void pbio_bluetooth_classic_link_key_delete(const uint8_t *bdaddr);
-
-/**
- * Gets the bonding record at the given index if it holds a valid link key,
- * used to enumerate stored bonds.
- *
- * @param [in]  index  Record index, up to ::PBIO_BLUETOOTH_CLASSIC_NUM_BONDS.
- * @returns            The record, or NULL if there is no valid key at this index.
- */
-const pbio_bluetooth_classic_link_key_t *pbio_bluetooth_classic_link_key_get_record(uint32_t index);
-
-#else // PBIO_CONFIG_BLUETOOTH
+#else // PBDRV_CONFIG_BLUETOOTH_LE
 
 static inline void pbio_bluetooth_deinit(void) {
 }
@@ -602,7 +526,96 @@ static inline pbio_error_t pbio_bluetooth_close_user_tasks(pbio_os_state_t *stat
     return PBIO_SUCCESS;
 }
 
-#endif // PBIO_CONFIG_BLUETOOTH
+#endif // PBDRV_CONFIG_BLUETOOTH_LE
+
+#if PBDRV_CONFIG_BLUETOOTH_CLASSIC_BONDS
+
+/**
+ * Registers the persisted bonding records, called by pbsys once on boot
+ * after loading stored settings.
+ *
+ * @param [in]  records  Array of ::PBIO_BLUETOOTH_CLASSIC_NUM_BONDS records.
+ */
+void pbio_bluetooth_classic_apply_loaded_link_keys(pbio_bluetooth_classic_link_key_t *records);
+
+/**
+ * Gets the name of a registered device, for display purposes.
+ *
+ * @param [in]  bdaddr  Bluetooth address of the remote device (6 bytes).
+ * @returns             The name, or NULL if the device is not registered.
+ */
+const char *pbio_bluetooth_classic_link_key_get_name(const uint8_t *bdaddr);
+
+/**
+ * Registers a provisional bonding record for a device about to be paired,
+ * making it the most recently used one. Called by the Bluetooth stack driver
+ * when pairing starts. If the pool is full, the least recently registered
+ * device is forgotten.
+ *
+ * @param [in]  bdaddr  Bluetooth address of the remote device (6 bytes).
+ * @param [in]  name    Device name.
+ */
+void pbio_bluetooth_classic_link_key_register(const uint8_t *bdaddr, const char *name);
+
+/**
+ * Updates the name of a registered device, without otherwise touching its
+ * record. Used when the name is only learned after registering, such as when
+ * a host computer initiates pairing and the name is requested afterwards.
+ *
+ * @param [in]  bdaddr  Bluetooth address of the remote device (6 bytes).
+ * @param [in]  name    Device name.
+ */
+void pbio_bluetooth_classic_link_key_set_name(const uint8_t *bdaddr, const char *name);
+
+/**
+ * Forgets a bonding record entirely, e.g. when pairing was cancelled or
+ * timed out. Unlike pbio_bluetooth_classic_link_key_delete(), this also drops
+ * the user's registration, so no new key will be stored for the device.
+ *
+ * @param [in]  bdaddr  Bluetooth address of the remote device (6 bytes).
+ */
+void pbio_bluetooth_classic_link_key_unregister(const uint8_t *bdaddr);
+
+/**
+ * Gets the stored link key for a remote device, called by the Bluetooth
+ * stack on (re)connect.
+ *
+ * @param [in]  bdaddr         Bluetooth address of the remote device (6 bytes).
+ * @param [out] link_key       Buffer to receive the 16-byte link key.
+ * @param [out] link_key_type  The stored link key type.
+ * @returns                    True if a key was found, false otherwise.
+ */
+bool pbio_bluetooth_classic_link_key_get(const uint8_t *bdaddr, uint8_t *link_key, uint16_t *link_key_type);
+
+/**
+ * Stores the link key negotiated during pairing, called by the Bluetooth
+ * stack. Only stored if the device was first registered by the user, which
+ * fills the record with the address and name.
+ *
+ * @param [in]  bdaddr         Bluetooth address of the remote device (6 bytes).
+ * @param [in]  link_key       The 16-byte link key.
+ * @param [in]  link_key_type  The link key type.
+ */
+void pbio_bluetooth_classic_link_key_put(const uint8_t *bdaddr, const uint8_t *link_key, uint16_t link_key_type);
+
+/**
+ * Deletes the stored link key for a remote device (e.g. when it turned
+ * stale), keeping the user's device registration.
+ *
+ * @param [in]  bdaddr  Bluetooth address of the remote device (6 bytes).
+ */
+void pbio_bluetooth_classic_link_key_delete(const uint8_t *bdaddr);
+
+/**
+ * Gets the bonding record at the given index if it holds a valid link key,
+ * used to enumerate stored bonds.
+ *
+ * @param [in]  index  Record index, up to ::PBIO_BLUETOOTH_CLASSIC_NUM_BONDS.
+ * @returns            The record, or NULL if there is no valid key at this index.
+ */
+const pbio_bluetooth_classic_link_key_t *pbio_bluetooth_classic_link_key_get_record(uint32_t index);
+
+#endif // PBDRV_CONFIG_BLUETOOTH_CLASSIC_BONDS
 
 #endif // _PBIO_BLUETOOTH_H_
 

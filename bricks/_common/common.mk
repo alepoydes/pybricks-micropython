@@ -140,6 +140,9 @@ ifeq ($(PB_LIB_BLE5STACK),1)
 INC += -I$(PBTOP)/lib/ble5stack/central
 endif
 ifeq ($(PB_LIB_BTSTACK),1)
+# BTstack includes "btstack_config.h" by that fixed name; ours lives with the
+# driver and is shared by every platform.
+INC += -I$(PBTOP)/lib/pbio/drv/bluetooth
 INC += -I$(PBTOP)/lib/btstack/chipset/cc256x
 INC += -I$(PBTOP)/lib/btstack/src
 ifeq ($(PB_MCU_FAMILY),native)
@@ -191,6 +194,8 @@ ifeq ($(CI_MODE),1)
 CFLAGS += -DPBDRV_CONFIG_RUN_ON_CI
 endif
 CFLAGS += $(INC) -Wall -Werror -Wdouble-promotion -Wfloat-conversion -std=gnu99 $(COPT) -D_GNU_SOURCE
+# The virtual hub compiles programs at runtime, from any working directory.
+CFLAGS += -DPBSYS_HMI_VIRTUAL_COMPILER='"$(abspath $(PBTOP)/tools/compile.py)"'
 # Newer glibc math.h no longer exposes __uint32_t/__int32_t used by fdlibm.h.
 $(BUILD)/lib/libm/%.o: CFLAGS += -include sys/types.h
 ifeq ($(UNAME_S),Linux)
@@ -455,16 +460,32 @@ BTSTACK_SRC_C += $(addprefix lib/btstack/chipset/cc256x/,\
 	btstack_chipset_cc256x.c \
 	)
 
-# Bluetooth Classic profiles (HID host etc.). Requires ENABLE_CLASSIC in the
-# platform btstack_config.h.
-ifeq ($(PB_LIB_BTSTACK_CLASSIC),1)
+# Bluetooth Classic profiles. Each requires ENABLE_CLASSIC in the platform
+# btstack_config.h, but ENABLE_CLASSIC on its own needs none of these sources:
+# peer-to-peer messaging talks L2CAP, which is already in the base sources.
+ifneq ($(filter 1,$(PB_LIB_BTSTACK_CLASSIC_HID) $(PB_LIB_BTSTACK_CLASSIC_HOST)),)
+# SDP, needed by both profiles below: to be found by an outside device, and,
+# for HID, to fetch the report descriptor from it.
 BTSTACK_SRC_C += $(addprefix lib/btstack/src/classic/,\
 	device_id_server.c \
-	hid_host.c \
-	rfcomm.c \
 	sdp_client.c \
 	sdp_server.c \
 	sdp_util.c \
+	)
+endif
+
+# HID host, for Bluetooth Classic gamepads.
+ifeq ($(PB_LIB_BTSTACK_CLASSIC_HID),1)
+BTSTACK_SRC_C += $(addprefix lib/btstack/src/classic/,\
+	hid_host.c \
+	)
+endif
+
+# RFCOMM/SPP serial server, for the connection from a host computer. Hubs that
+# reach the host over BLE instead do not need it.
+ifeq ($(PB_LIB_BTSTACK_CLASSIC_HOST),1)
+BTSTACK_SRC_C += $(addprefix lib/btstack/src/classic/,\
+	rfcomm.c \
 	spp_server.c \
 	)
 endif
@@ -474,8 +495,6 @@ ifeq ($(PB_MCU_FAMILY),native)
 BTSTACK_SRC_C += $(addprefix lib/btstack/,\
 	platform/libusb/hci_transport_h2_libusb.c \
 	platform/posix/hci_dump_posix_stdout.c \
-	platform/posix/btstack_tlv_posix.c \
-	src/ble/le_device_db_tlv.c \
 	chipset/zephyr/btstack_chipset_zephyr.c \
 	chipset/realtek/btstack_chipset_realtek.c \
 	chipset/bcm/btstack_chipset_bcm.c \
@@ -483,8 +502,9 @@ BTSTACK_SRC_C += $(addprefix lib/btstack/,\
 	3rd-party/rijndael/rijndael.c \
 	3rd-party/micro-ecc/uECC.c \
 	)
-# Suppress unused variable warning for this file
-$(BUILD)/lib/btstack/platform/libusb/hci_transport_h2_libusb.o: CFLAGS += -Wno-unused-variable
+# Suppress warnings about the parts of this file that the features we enable
+# do not reach, such as the SCO paths.
+$(BUILD)/lib/btstack/platform/libusb/hci_transport_h2_libusb.o: CFLAGS += -Wno-unused-variable -Wno-unused-function
 endif
 
 # STM32 HAL
@@ -675,7 +695,6 @@ OBJ += $(addprefix $(BUILD)/, $(PYBRICKS_PYBRICKS_SRC_C:.c=.o))
 
 OBJ += $(addprefix $(BUILD)/, $(LWRB_SRC_C:.c=.o))
 OBJ += $(addprefix $(BUILD)/, $(PBIO_SRC_C:.c=.o))
-OBJ += $(addprefix $(BUILD)/, $(LEGO_SPEC_SRC_C:.c=.o))
 OBJ += $(addprefix $(BUILD)/, $(SRC_LIBM:.c=.o))
 
 ifeq ($(PB_LIB_BLUENRG),1)
@@ -905,8 +924,14 @@ $(BUILD)/pru_ledpwm.bin.o: $(PBTOP)/lib/pbio/platform/ev3/pru_ledpwm.bin
 	$(Q)$(OBJCOPY) -I binary -O elf32-littlearm -B arm \
 		--rename-section .data=.pru1,alloc,load,readonly,data,contents $^ $@
 
+# Name given to the hub being flashed. Also picks which hub to flash when
+# several are attached, since a hub running Pybricks carries its name in its
+# USB product string. A hub already in its bootloader does not, so it is
+# flashed whatever it used to be called.
+NAME ?= $(PBIO_PLATFORM)
+
 deploy: $(BUILD)/firmware.zip
-	$(Q)$(FLASH) $< --name $(PBIO_PLATFORM)
+	$(Q)$(FLASH) $< --name $(NAME)
 
 .DELETE_ON_ERROR:
 

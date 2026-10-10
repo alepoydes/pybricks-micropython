@@ -14,6 +14,7 @@
 
 #include <pbdrv/cache.h>
 #include <pbdrv/compiler.h>
+#include <pbdrv/hardware.h>
 #include <pbio/serial.h>
 #include <pbio/os.h>
 
@@ -51,6 +52,13 @@
 // Packet size of the CDC notification (interrupt IN) endpoint. We never send
 // notifications, so this only needs to be large enough to be valid.
 #define NOTIF_EP_PKT_SZ         8
+// Polling interval of the notification endpoint. The units differ by speed:
+// at full speed bInterval counts 1 ms frames, but at high speed it is an
+// exponent selecting 2^(bInterval-1) microframes of 125 us. Both of these
+// mean 16 ms; using the full-speed value at high speed would ask for 2^15
+// microframes, i.e. 4096 ms.
+#define NOTIF_EP_INTERVAL_FS    16
+#define NOTIF_EP_INTERVAL_HS    8
 
 
 /**
@@ -116,7 +124,7 @@ PBDRV_USB_TYPE_PUNNING_HELPER(pbdrv_usb_ev3_conf_1);
 
 // The high-speed and full-speed configuration descriptors are identical apart
 // from the bulk endpoint max packet size, so a macro fills in the common parts.
-#define PBDRV_USB_EV3_CONF_1_COMMON(bulk_pkt_size) \
+#define PBDRV_USB_EV3_CONF_1_COMMON(bulk_pkt_size, notif_interval) \
     .conf_desc = { \
         .bLength = sizeof(pbdrv_usb_conf_desc_t), \
         .bDescriptorType = DESC_TYPE_CONFIGURATION, \
@@ -183,7 +191,7 @@ PBDRV_USB_TYPE_PUNNING_HELPER(pbdrv_usb_ev3_conf_1);
         .bEndpointAddress = 0x82, \
         .bmAttributes = PBDRV_USB_EP_TYPE_INTR, \
         .wMaxPacketSize = NOTIF_EP_PKT_SZ, \
-        .bInterval = 16, \
+        .bInterval = (notif_interval), \
     }, \
     /* Data interface */ \
     .data_iface = { \
@@ -216,13 +224,13 @@ PBDRV_USB_TYPE_PUNNING_HELPER(pbdrv_usb_ev3_conf_1);
 
 static const pbdrv_usb_ev3_conf_1_union_t configuration_1_desc_hs = {
     .s = {
-        PBDRV_USB_EV3_CONF_1_COMMON(PYBRICKS_EP_PKT_SZ_HS),
+        PBDRV_USB_EV3_CONF_1_COMMON(PYBRICKS_EP_PKT_SZ_HS, NOTIF_EP_INTERVAL_HS),
     }
 };
 
 static const pbdrv_usb_ev3_conf_1_union_t configuration_1_desc_fs = {
     .s = {
-        PBDRV_USB_EV3_CONF_1_COMMON(PYBRICKS_EP_PKT_SZ_FS),
+        PBDRV_USB_EV3_CONF_1_COMMON(PYBRICKS_EP_PKT_SZ_FS, NOTIF_EP_INTERVAL_FS),
     }
 };
 
@@ -246,9 +254,6 @@ static union {
 
 // Set while EP0 is waiting for the host to send the SET_LINE_CODING data stage.
 static bool pbdrv_usb_ep0_expect_line_coding;
-
-// Defined in pbio/platform/ev3/platform.c
-extern uint8_t pbdrv_ev3_bluetooth_mac_address[6];
 
 // USB stack state
 
@@ -514,7 +519,7 @@ static bool usb_get_descriptor(uint16_t wValue) {
 
                 case STRING_DESC_MFG:
                     pbdrv_usb_setup_data_to_send = pbdrv_usb_str_desc_mfg.u;
-                    pbdrv_usb_setup_data_to_send_sz = sizeof(pbdrv_usb_str_desc_mfg.s);
+                    pbdrv_usb_setup_data_to_send_sz = pbdrv_usb_str_desc_mfg.s.bLength;
                     return true;
 
                 case STRING_DESC_PRODUCT: {
@@ -524,19 +529,21 @@ static bool usb_get_descriptor(uint16_t wValue) {
                     return true;
                 }
 
-                case STRING_DESC_SERIAL:
-                    pbdrv_usb_ev3_ep0_buffer.b[0] = 2 * 2 * 6 + 2;
+                case STRING_DESC_SERIAL: {
+                    const uint8_t *mac_address = pbdrv_hardware_get_mac_address();
+                    pbdrv_usb_ev3_ep0_buffer.b[0] = 2 * 2 * PBDRV_HARDWARE_MAC_ADDRESS_SIZE + 2;
                     pbdrv_usb_ev3_ep0_buffer.b[1] = DESC_TYPE_STRING;
-                    for (i = 0; i < 6; i++) {
-                        pbdrv_usb_ev3_ep0_buffer.b[2 + 4 * i + 0] = "0123456789ABCDEF"[pbdrv_ev3_bluetooth_mac_address[i] >> 4];
+                    for (i = 0; i < PBDRV_HARDWARE_MAC_ADDRESS_SIZE; i++) {
+                        pbdrv_usb_ev3_ep0_buffer.b[2 + 4 * i + 0] = "0123456789ABCDEF"[mac_address[i] >> 4];
                         pbdrv_usb_ev3_ep0_buffer.b[2 + 4 * i + 1] = 0;
-                        pbdrv_usb_ev3_ep0_buffer.b[2 + 4 * i + 2] = "0123456789ABCDEF"[pbdrv_ev3_bluetooth_mac_address[i] & 0xf];
+                        pbdrv_usb_ev3_ep0_buffer.b[2 + 4 * i + 2] = "0123456789ABCDEF"[mac_address[i] & 0xf];
                         pbdrv_usb_ev3_ep0_buffer.b[2 + 4 * i + 3] = 0;
                     }
 
                     pbdrv_usb_setup_data_to_send = pbdrv_usb_ev3_ep0_buffer.u;
                     pbdrv_usb_setup_data_to_send_sz = pbdrv_usb_ev3_ep0_buffer.b[0];
                     return true;
+                }
             }
             break;
     }
@@ -846,20 +853,23 @@ static void usb_device_intr(void) {
         // EP 1 OUT, host to device, rx
         uint8_t rxcsr = HWREGB(USB0_BASE + USB_O_RXCSRL1);
 
-        // Clear error bits
-        rxcsr &= ~USB_RXCSRL1_STALLED;
-
-        HWREGB(USB0_BASE + USB_O_RXCSRL1) = rxcsr;
+        // Clear the sticky error bits by writing back only the bits that have
+        // to persist: RXRDY, because clearing it would drop a received packet,
+        // and the stall request. Writing back the value we read would leave
+        // the overrun flag set forever and re-trigger the write-only FLUSH and
+        // CLRDT bits if they ever read as set.
+        HWREGB(USB0_BASE + USB_O_RXCSRL1) = rxcsr & (USB_RXCSRL1_RXRDY | USB_RXCSRL1_STALL);
     }
 
     if (intr_src & USBOTG_INTR_EP1_IN) {
         // EP 1 IN, device to host, tx
         uint8_t txcsr = HWREGB(USB0_BASE + USB_O_TXCSRL1);
 
-        // Clear error bits
-        txcsr &= ~(USB_TXCSRL1_STALLED | USB_TXCSRL1_UNDRN | USB_TXCSRL1_FIFONE);
-
-        HWREGB(USB0_BASE + USB_O_TXCSRL1) = txcsr;
+        // Same here, and the stakes are higher: TXRDY is a read/write control
+        // bit, so writing back the value we read re-asserts it whenever a
+        // packet is still queued for the host, making the controller transmit
+        // that packet a second time. Only the stall request has to persist.
+        HWREGB(USB0_BASE + USB_O_TXCSRL1) = txcsr & USB_TXCSRL1_STALL;
     }
 
     // Check for DMA completions

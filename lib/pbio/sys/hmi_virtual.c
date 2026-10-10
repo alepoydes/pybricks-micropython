@@ -48,12 +48,12 @@
 static uint32_t pbsys_hmi_num_programs;
 
 static void load_program(const char *path) {
-    // Pybricksdev helper script, pipes multi-mpy to us.
+    // Helper script, pipes multi-mpy to us.
     char command[512];
-    snprintf(command, sizeof(command), "pybricksdev compile --bin %s", path);
+    snprintf(command, sizeof(command), "%s %s", PBSYS_HMI_VIRTUAL_COMPILER, path);
     FILE *pipe = popen(command, "r");
     if (!pipe) {
-        printf("Failed to compile program with Pybricksdev\n");
+        printf("Failed to compile program\n");
         exit(0);
     }
 
@@ -170,6 +170,7 @@ static pbio_error_t run_ui(pbio_os_state_t *state, pbio_os_timer_t *timer) {
         DEBUG_PRINT("Start HMI loop\n");
 
         pbsys_hmi_ev3_ui_draw();
+        pbio_os_timer_reset(timer);
 
         // Buttons could be pressed at the end of the user program, so wait for
         // a release and then a new press, or until we have to exit early.
@@ -245,7 +246,7 @@ static pbio_error_t run_ui(pbio_os_state_t *state, pbio_os_timer_t *timer) {
     // doing that. Established connections are kept.
     pbdrv_bluetooth_inquiry_stop();
     pbdrv_bluetooth_classic_hid_pair_cancel();
-    pbdrv_bluetooth_classic_host_pair_cancel();
+    pbdrv_bluetooth_classic_host_set_discoverable(false);
 
     // Wait for all buttons to be released so the user doesn't accidentally
     // push their robot off course.

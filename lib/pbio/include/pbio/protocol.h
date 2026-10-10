@@ -394,6 +394,12 @@ typedef enum {
      * @since Pybricks Profile v1.5.0
      */
     PBIO_PYBRICKS_STATUS_FILE_IO_IN_PROGRESS = 13,
+    /**
+     * Hub is currently transmitting sensor telemetry.
+     *
+     * @since Pybricks Profile v1.7.0
+     */
+    PBIO_PYBRICKS_STATUS_TELEMETRY_ACTIVE = 14,
     /** Total number of indications. */
     NUM_PBIO_PYBRICKS_STATUS,
 } pbio_pybricks_status_flags_t;
@@ -551,10 +557,6 @@ enum {
     /** PnP ID Characteristic UUID. */
     PBIO_GATT_PNP_ID_CHAR_UUID = 0x2A50,
 };
-
-extern const uint8_t pbio_nus_service_uuid[];
-extern const uint8_t pbio_nus_rx_char_uuid[];
-extern const uint8_t pbio_nus_tx_char_uuid[];
 
 /**
  * Characteristic namespace for characteristic read requests.

@@ -5,8 +5,6 @@
 
 #include <pbio/config.h>
 
-#if PBIO_CONFIG_BLUETOOTH
-
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -36,7 +34,9 @@
 #define DEBUG_PRINT(...)
 #endif
 
-#if PBDRV_CONFIG_BLUETOOTH && (PBSYS_CONFIG_HOST_EVENT_OUT_SIZE > PBDRV_CONFIG_BLUETOOTH_MAX_MTU_SIZE - PBIO_BLUETOOTH_ATT_HEADER_SIZE)
+#if PBDRV_CONFIG_BLUETOOTH_LE
+
+#if PBSYS_CONFIG_HOST_EVENT_OUT_SIZE > PBDRV_CONFIG_BLUETOOTH_MAX_MTU_SIZE - PBIO_BLUETOOTH_ATT_HEADER_SIZE
 #error "Host event message must fit in one BLE packet".
 #endif
 
@@ -554,7 +554,7 @@ pbio_error_t pbio_bluetooth_close_user_tasks(pbio_os_state_t *state, pbio_os_tim
     // Cancel Bluetooth Classic pairing and scanning, if ongoing. Established
     // classic connections are kept.
     pbdrv_bluetooth_classic_hid_pair_cancel();
-    pbdrv_bluetooth_classic_host_pair_cancel();
+    pbdrv_bluetooth_classic_host_set_discoverable(false);
     pbdrv_bluetooth_inquiry_stop();
 
     PBIO_OS_ASYNC_END(PBIO_SUCCESS);
@@ -576,7 +576,9 @@ void pbio_bluetooth_deinit(void) {
     pbio_os_request_poll();
 }
 
-#if PBDRV_CONFIG_BLUETOOTH_CLASSIC
+#endif // PBDRV_CONFIG_BLUETOOTH_LE
+
+#if PBDRV_CONFIG_BLUETOOTH_CLASSIC_BONDS
 
 // Stack-agnostic Bluetooth Classic link key store, backed by the persisted
 // bonding records in pbsys storage settings. A record is registered (address,
@@ -667,6 +669,15 @@ void pbio_bluetooth_classic_link_key_register(const uint8_t *bdaddr, const char 
     pbsys_storage_request_write();
 }
 
+void pbio_bluetooth_classic_link_key_set_name(const uint8_t *bdaddr, const char *name) {
+    pbio_bluetooth_classic_link_key_t *record = link_key_find(bdaddr);
+    if (!record || strncmp(record->name, name, sizeof(record->name)) == 0) {
+        return;
+    }
+    snprintf(record->name, sizeof(record->name), "%s", name);
+    pbsys_storage_request_write();
+}
+
 void pbio_bluetooth_classic_link_key_unregister(const uint8_t *bdaddr) {
     pbio_bluetooth_classic_link_key_t *record = link_key_find(bdaddr);
     if (!record) {
@@ -723,6 +734,4 @@ const pbio_bluetooth_classic_link_key_t *pbio_bluetooth_classic_link_key_get_rec
     return link_key_is_set(record) ? record : NULL;
 }
 
-#endif // PBDRV_CONFIG_BLUETOOTH_CLASSIC
-
-#endif // PBIO_CONFIG_BLUETOOTH
+#endif // PBDRV_CONFIG_BLUETOOTH_CLASSIC_BONDS

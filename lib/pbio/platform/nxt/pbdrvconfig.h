@@ -9,8 +9,11 @@
 #define PBDRV_CONFIG_BATTERY                        (1)
 #define PBDRV_CONFIG_BATTERY_NXT                    (1)
 
+// The RAM disk holds the saved data plus the MicroPython heap, so its size
+// sets how much memory user programs get. It is the largest single consumer
+// of the 64K of RAM; the supervisor stack takes whatever is left over.
 #define PBDRV_CONFIG_BLOCK_DEVICE                   (1)
-#define PBDRV_CONFIG_BLOCK_DEVICE_RAM_SIZE          (18 * 1024)
+#define PBDRV_CONFIG_BLOCK_DEVICE_RAM_SIZE          (24 * 1024)
 #define PBDRV_CONFIG_BLOCK_DEVICE_NXT               (1)
 #define PBDRV_CONFIG_BLOCK_DEVICE_NXT_SIZE          (16 * 1024) // Must match FLASH_USER in linker script
 
@@ -18,10 +21,11 @@
 #define PBDRV_CONFIG_BUTTON_NXT                     (1)
 
 // The BlueCore 4 does Bluetooth Classic only, and runs the stack itself, so
-// none of the BLE controller driver applies to it.
-#define PBDRV_CONFIG_BLUETOOTH                      (0)
-#define PBDRV_CONFIG_BLUETOOTH_CLASSIC              (1)
+// PBDRV_CONFIG_BLUETOOTH_LE is left out. It also keeps its own bonding store,
+// so PBDRV_CONFIG_BLUETOOTH_CLASSIC_BONDS is left out too.
+#define PBDRV_CONFIG_BLUETOOTH                      (1)
 #define PBDRV_CONFIG_BLUETOOTH_NXT                  (1)
+#define PBDRV_CONFIG_BLUETOOTH_CLASSIC_HOST         (1)
 
 #define PBDRV_CONFIG_HUB_KIND                       PBIO_PYBRICKS_HUB_KIND_NXT
 #define PBDRV_CONFIG_HUB_VARIANT                    0x0000
@@ -40,6 +44,9 @@
 
 #define PBDRV_CONFIG_GPIO                           (1)
 #define PBDRV_CONFIG_GPIO_NXT                       (1)
+
+#define PBDRV_CONFIG_HARDWARE                       (1)
+#define PBDRV_CONFIG_HARDWARE_NXT                   (1)
 
 #define PBDRV_CONFIG_IOPORT                         (1)
 #define PBDRV_CONFIG_IOPORT_HAS_ADC                 (1)

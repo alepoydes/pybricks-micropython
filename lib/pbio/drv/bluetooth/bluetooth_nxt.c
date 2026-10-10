@@ -28,6 +28,7 @@
 
 #include <pbdrv/bluetooth.h>
 #include <pbdrv/display.h>
+#include <pbdrv/hardware.h>
 
 #include <pbio/busy_count.h>
 #include <pbio/error.h>
@@ -38,7 +39,6 @@
 
 #include <pbsys/host.h>
 
-#include "bluetooth_nxt.h"
 
 #include "../rproc/rproc.h"
 
@@ -121,10 +121,6 @@ typedef enum {
     /** Not a BC4 message: used to mean that no reply is expected. */
     BT_MSG_NONE = 0xFF,
 } bt_msg_t;
-
-/** Address of this hub, once the BC4 has reported it. */
-static uint8_t bt_local_addr[6];
-static bool bt_local_addr_valid;
 
 /** Received stream bytes, written by the interrupt and drained by pbio serial. */
 static lwrb_t bt_rx_ring;
@@ -500,8 +496,7 @@ static pbio_error_t bt_process_thread(pbio_os_state_t *state, void *context) {
         // before anything else.
         PBIO_OS_AWAIT(state, &sub, err = bt_command(&sub, BT_MSG_GET_LOCAL_ADDR, NULL, 0, BT_MSG_GET_LOCAL_ADDR_RESULT));
         if (err == PBIO_SUCCESS) {
-            memcpy(bt_local_addr, (const void *)bt.reply_args, sizeof(bt_local_addr));
-            bt_local_addr_valid = true;
+            pbdrv_hardware_set_mac_address((const uint8_t *)bt.reply_args);
         }
 
         // The BC4 name is fixed-length and padded with zeros. It is all the
@@ -606,16 +601,6 @@ void pbdrv_bluetooth_init(void) {
     pbio_os_process_start(&bt_process, bt_process_thread, NULL);
 }
 
-bool pbdrv_bluetooth_nxt_get_local_address(uint8_t *addr) {
-
-    if (!bt_local_addr_valid) {
-        return false;
-    }
-
-    memcpy(addr, bt_local_addr, sizeof(bt_local_addr));
-    return true;
-}
-
 //
 // Host connection
 //
@@ -664,64 +649,16 @@ pbio_error_t pbdrv_bluetooth_classic_host_tx_message(pbio_os_state_t *state, con
 }
 
 //
-// Not implemented yet: inquiry scanning and pairing initiated by the hub, and
-// HID devices, which the BC4 firmware does not support at all.
+// Not implemented yet: pairing managed from the hub. Inquiry scanning and HID
+// devices are not supported by the BC4 firmware at all, so those flags are off
+// and the stubs in pbdrv/bluetooth.h cover them.
 //
 
-pbio_error_t pbdrv_bluetooth_inquiry_start(void) {
-    return PBIO_ERROR_NOT_SUPPORTED;
+void pbdrv_bluetooth_classic_host_set_discoverable(bool discoverable) {
 }
 
-void pbdrv_bluetooth_inquiry_stop(void) {
-}
-
-pbio_error_t pbdrv_bluetooth_inquiry_get_results(uint32_t *num, pbio_bluetooth_inquiry_result_t **results) {
-    return PBIO_ERROR_NOT_SUPPORTED;
-}
-
-pbio_error_t pbdrv_bluetooth_classic_host_pair(const uint8_t *bdaddr, const char *name) {
-    return PBIO_ERROR_NOT_SUPPORTED;
-}
-
-pbio_error_t pbdrv_bluetooth_classic_host_pair_status(void) {
-    return PBIO_ERROR_NOT_SUPPORTED;
-}
-
-bool pbdrv_bluetooth_classic_host_pair_passkey(uint32_t *passkey) {
+bool pbdrv_bluetooth_classic_host_is_discoverable(void) {
     return false;
-}
-
-void pbdrv_bluetooth_classic_host_pair_cancel(void) {
-}
-
-pbio_error_t pbdrv_bluetooth_classic_hid_pair(const uint8_t *bdaddr, const char *name) {
-    return PBIO_ERROR_NOT_SUPPORTED;
-}
-
-pbio_error_t pbdrv_bluetooth_classic_hid_pair_status(void) {
-    return PBIO_ERROR_NOT_SUPPORTED;
-}
-
-void pbdrv_bluetooth_classic_hid_pair_cancel(void) {
-}
-
-bool pbdrv_bluetooth_classic_hid_is_connected(void) {
-    return false;
-}
-
-uint32_t pbdrv_bluetooth_classic_hid_get_report(uint8_t report_id, uint8_t *data, uint32_t size) {
-    return 0;
-}
-
-bool pbdrv_bluetooth_classic_hid_get_report_id(uint32_t index, uint8_t *report_id) {
-    return false;
-}
-
-const char *pbdrv_bluetooth_classic_hid_get_connected_name(void) {
-    return NULL;
-}
-
-void pbdrv_bluetooth_classic_hid_disconnect(void) {
 }
 
 #endif // PBDRV_CONFIG_BLUETOOTH_NXT

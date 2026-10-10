@@ -13,6 +13,7 @@
 
 #include <pbio/error.h>
 #include <pbio/imu.h>
+#include <pbio/port_lump.h>
 #include <pbsys/status.h>
 #include <pbsys/storage.h>
 #include <pbsys/storage_settings.h>
@@ -28,13 +29,18 @@ void pbsys_storage_settings_set_defaults(pbsys_storage_settings_t *settings) {
     settings->flags = 0;
     pbsys_storage_settings_set_flag(PBSYS_STORAGE_SETTINGS_FLAGS_BLUETOOTH_ENABLED, true);
     pbsys_storage_settings_set_flag(PBSYS_STORAGE_SETTINGS_FLAGS_SENSOR_POWER_SAFETY_PROMPT_ACCEPTED, false);
+    pbsys_storage_settings_set_flag(PBSYS_STORAGE_SETTINGS_FLAGS_TELEMETRY_STARTS_AT_BOOT, true);
 
     #if PBIO_CONFIG_IMU
     pbio_imu_set_default_settings(&settings->imu_settings);
     #endif // PBIO_CONFIG_IMU
 
-    #if PBDRV_CONFIG_BLUETOOTH_CLASSIC && PBIO_CONFIG_BLUETOOTH
+    #if PBDRV_CONFIG_BLUETOOTH_CLASSIC_BONDS
     memset(settings->bluetooth_bonds, 0, sizeof(settings->bluetooth_bonds));
+    #endif
+
+    #if PBIO_CONFIG_PORT_LUMP_EV3
+    pbio_port_lump_ev3_color_set_default_calibration(settings->ev3_color_calibration);
     #endif
 
     // Always request save for this one off default setter.
@@ -53,9 +59,20 @@ void pbsys_storage_settings_apply_loaded_settings(pbsys_storage_settings_t *sett
 
     // Chips that keep their own bonding store, like the NXT BlueCore, do not
     // use the pbio link key store.
-    #if PBDRV_CONFIG_BLUETOOTH_CLASSIC && PBIO_CONFIG_BLUETOOTH
+    #if PBDRV_CONFIG_BLUETOOTH_CLASSIC_BONDS
     pbio_bluetooth_classic_apply_loaded_link_keys(settings->bluetooth_bonds);
     #endif
+
+    #if PBIO_CONFIG_PORT_LUMP_EV3
+    pbio_port_lump_ev3_color_apply_loaded_calibration(settings->ev3_color_calibration);
+    #endif
+
+    // Persist user preference for telemetry.
+    if (pbsys_storage_settings_get_flag(PBSYS_STORAGE_SETTINGS_FLAGS_TELEMETRY_STARTS_AT_BOOT)) {
+        pbsys_status_set(PBIO_PYBRICKS_STATUS_TELEMETRY_ACTIVE);
+    } else {
+        pbsys_status_clear(PBIO_PYBRICKS_STATUS_TELEMETRY_ACTIVE);
+    }
 }
 
 /**

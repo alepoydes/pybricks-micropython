@@ -54,6 +54,7 @@ PYBRICKS_PYBRICKS_SRC_C = $(addprefix pybricks/,\
 	messaging/pb_module_messaging.c \
 	messaging/pb_type_app_data.c \
 	messaging/pb_type_ble_radio.c \
+	messaging/pb_type_hub_network.c \
 	nxtdevices/pb_module_nxtdevices.c \
 	nxtdevices/pb_type_nxtdevices_colorsensor.c \
 	nxtdevices/pb_type_nxtdevices_energymeter.c \
@@ -155,6 +156,9 @@ PBIO_SRC_C = $(addprefix lib/pbio/,\
 	drv/gpio/gpio_pico.c \
 	drv/gpio/gpio_stm32.c \
 	drv/gpio/gpio_virtual.c \
+	drv/hardware/hardware_ev3.c \
+	drv/hardware/hardware_nxt.c \
+	drv/hardware/hardware_stm32.c \
 	drv/i2c/i2c_ev3.c \
 	drv/imu/imu_lsm6ds3tr_c_stm32.c \
 	drv/ioport/ioport.c \
@@ -235,9 +239,11 @@ PBIO_SRC_C = $(addprefix lib/pbio/,\
 	src/parent.c \
 	src/port_dcm_ev3.c \
 	src/port_dcm_pup.c \
-	src/port_lump.c \
+	src/port_lump/ev3_color.c \
+	src/port_lump/protocol.c \
+	src/port_lump/sensors.c \
+	src/port_lump/telemetry.c \
 	src/port.c \
-	src/protocol/nus.c \
 	src/protocol/pybricks.c \
 	src/servo.c \
 	src/tacho.c \
@@ -262,12 +268,6 @@ PBIO_SRC_C = $(addprefix lib/pbio/,\
 	sys/storage_settings.c \
 	sys/storage.c \
 	sys/telemetry.c \
-	)
-
-# LEGO specification library
-
-LEGO_SPEC_SRC_C = $(addprefix lib/lego/,\
-	device.c \
 	)
 
 # MicroPython math library

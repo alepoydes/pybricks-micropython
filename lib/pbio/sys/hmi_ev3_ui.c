@@ -8,6 +8,7 @@
 
 #if PBSYS_CONFIG_HMI_EV3_UI
 
+#include <pbsys/host.h>
 #include <pbsys/main.h>
 #include <pbsys/status.h>
 #include <pbsys/storage.h>
@@ -15,6 +16,7 @@
 #include <pbdrv/bluetooth.h>
 #include <pbdrv/clock.h>
 #include <pbdrv/display.h>
+#include <pbdrv/hardware.h>
 
 #include <pbio/battery.h>
 #include <pbio/busy_count.h>
@@ -52,12 +54,16 @@ typedef enum {
     PBSYS_HMI_EV3_UI_OVERLAY_NO_PROGRAM,
     /** Feature coming soon. */
     PBSYS_HMI_EV3_UI_OVERLAY_COMING_SOON,
+    /** Hub information such as the Bluetooth address and version. */
+    PBSYS_HMI_EV3_UI_OVERLAY_INFO,
     /** Shutdown. Yes highlighted. */
     PBSYS_HMI_EV3_UI_OVERLAY_SHUTDOWN_YES,
     /** Shutdown. No highlighted. */
     PBSYS_HMI_EV3_UI_OVERLAY_SHUTDOWN_NO,
-    /** Bluetooth Classic device management (gamepad, PC). */
-    PBSYS_HMI_EV3_UI_OVERLAY_DEVICE,
+    /** Adding a host computer over Bluetooth Classic. */
+    PBSYS_HMI_EV3_UI_OVERLAY_HOST,
+    /** Adding a Bluetooth Classic gamepad. */
+    PBSYS_HMI_EV3_UI_OVERLAY_GAMEPAD,
 } pbsys_hmi_ev3_ui_overlay_type_t;
 
 typedef struct {
@@ -98,7 +104,7 @@ static const char *apps[] = {
  * Available settings on settings tab.
  */
 static const char *settings[] = {
-    " Version",
+    " Hub information",
     " Add new computer",
     " Add new gamepad",
 };
@@ -170,19 +176,6 @@ static const char *pbsys_hmi_ev3_ui_get_tab_entry_text(pbsys_hmi_ev3_ui_tab_t ta
         case PBSYS_HMI_EV3_UI_TAB_APPS:
             return apps[entry];
         case PBSYS_HMI_EV3_UI_TAB_SETTINGS:
-            if (entry == 0) {
-                static char version[36];
-                if (PBIO_VERSION_LEVEL_HEX == 0xF) {
-                    snprintf(version, sizeof(version), " Version                  %d.%d.%d",
-                        PBIO_VERSION_MAJOR, PBIO_VERSION_MINOR, PBIO_VERSION_MICRO);
-                } else {
-                    snprintf(version, sizeof(version), " Version %d.%d.%d%x%d-%.6s",
-                        PBIO_VERSION_MAJOR, PBIO_VERSION_MINOR, PBIO_VERSION_MICRO,
-                        PBIO_VERSION_LEVEL_HEX,
-                        PBIO_VERSION_SERIAL, PBIO_VERSION_HASH);
-                }
-                return version;
-            }
             return settings[entry];
         default:
             return "";
@@ -207,74 +200,92 @@ static void pbsys_hmi_ev3_ui_increment_entry_on_current_tab(bool increment) {
 }
 
 /**
- * Bluetooth Classic device overlay phase.
+ * Hub information overlay.
+ *
+ * Everything shown here is fixed at build time except the Bluetooth address,
+ * which the controller only knows once it has finished starting up. So this
+ * keeps refreshing until then, letting the address fill itself in rather than
+ * leaving the user with a blank one if they get here quickly after boot.
  */
-typedef enum {
-    /** Device is paired and connected, or paired and free to connect. */
-    PBSYS_HMI_EV3_UI_DEVICE_PHASE_READY,
-    /** Scanning for devices and browsing the results. */
-    PBSYS_HMI_EV3_UI_DEVICE_PHASE_SCAN,
-    /** Connecting to the selected device. */
-    PBSYS_HMI_EV3_UI_DEVICE_PHASE_CONNECT,
-    /** Connection attempt timed out. */
-    PBSYS_HMI_EV3_UI_DEVICE_PHASE_FAILED,
-} pbsys_hmi_ev3_ui_device_phase_t;
+static pbsys_hmi_ev3_ui_action_t pbsys_hmi_ev3_ui_handle_info_button(pbio_button_flags_t button) {
+
+    if (button == PBIO_BUTTON_LEFT_UP || button == PBIO_BUTTON_CENTER) {
+        state.overlay = PBSYS_HMI_EV3_UI_OVERLAY_NONE;
+        return PBSYS_HMI_EV3_UI_ACTION_NONE;
+    }
+
+    return pbdrv_bluetooth_peer_is_ready() ?
+           PBSYS_HMI_EV3_UI_ACTION_NONE : PBSYS_HMI_EV3_UI_ACTION_REFRESH_SOON;
+}
 
 /**
- * One kind of Bluetooth Classic device that can be paired via the UI.
+ * Host computer overlay.
+ *
+ * The user pairs from their computer's own Bluetooth menu rather than from
+ * the hub. That way the computer learns the hub name and shows its usual
+ * pairing prompt, instead of an unnamed toy appearing out of nowhere. It is
+ * also a one-off: afterwards the connection is always opened from a Pybricks
+ * app, never from the computer's Bluetooth menu.
+ *
+ * All the hub does here is make itself discoverable, which is what gets it
+ * into that menu. It cannot tell whether the user got what they came for:
+ * pairing needs nothing from the hub and happens off its own bat, including
+ * when a computer that still has the hub in its list reconnects after a
+ * firmware update wiped the hub's key. So there is no state to keep, and no
+ * success to report. What the hub does know is whether a computer is
+ * connected right now, which is worth saying because it answers the question
+ * either way: nothing to do if they open this later, and confirmation the
+ * moment they do connect, since this is drawn from live state.
  */
-typedef struct {
-    /** Status text shown while scanning, so the user knows what to pick. */
-    const char *scan_text;
-    /** Status text shown while pairing, so the user knows what to do. */
-    const char *connect_text;
-    pbio_error_t (*pair)(const uint8_t *bdaddr, const char *name);
-    pbio_error_t (*pair_status)(void);
-    /** Optional. Gets the pairing passkey to verify on the other device. */
-    bool (*pair_passkey)(uint32_t *passkey);
-    void (*pair_cancel)(void);
-    bool (*is_connected)(void);
-    /** Name of the connected device, NULL if unknown or not connected. */
-    const char *(*get_connected_name)(void);
-} pbsys_hmi_ev3_ui_device_config_t;
+static pbsys_hmi_ev3_ui_action_t pbsys_hmi_ev3_ui_handle_host_button(pbio_button_flags_t button) {
 
-static const pbsys_hmi_ev3_ui_device_config_t gamepad_config = {
-    .scan_text = "Scanning: Gamepad",
-    .connect_text = "Connecting...",
-    .pair = pbdrv_bluetooth_classic_hid_pair,
-    .pair_status = pbdrv_bluetooth_classic_hid_pair_status,
-    .pair_cancel = pbdrv_bluetooth_classic_hid_pair_cancel,
-    .is_connected = pbdrv_bluetooth_classic_hid_is_connected,
-    .get_connected_name = pbdrv_bluetooth_classic_hid_get_connected_name,
-};
+    if (button == PBIO_BUTTON_LEFT_UP || button == PBIO_BUTTON_CENTER) {
+        pbdrv_bluetooth_classic_host_set_discoverable(false);
+        state.overlay = PBSYS_HMI_EV3_UI_OVERLAY_NONE;
+        return PBSYS_HMI_EV3_UI_ACTION_NONE;
+    }
 
-static const pbsys_hmi_ev3_ui_device_config_t host_config = {
-    .scan_text = "Scanning: Computer",
-    .connect_text = "Confirm on computer",
-    .pair = pbdrv_bluetooth_classic_host_pair,
-    .pair_status = pbdrv_bluetooth_classic_host_pair_status,
-    .pair_passkey = pbdrv_bluetooth_classic_host_pair_passkey,
-    .pair_cancel = pbdrv_bluetooth_classic_host_pair_cancel,
-    .is_connected = pbdrv_bluetooth_classic_host_is_connected,
-    .get_connected_name = pbdrv_bluetooth_classic_host_get_connected_name,
-};
+    // Discoverable only while this is open and there is nothing connected.
+    // Set on every refresh rather than once, so that it still takes effect if
+    // Bluetooth was not ready yet when the user opened this.
+    pbdrv_bluetooth_classic_host_set_discoverable(!pbdrv_bluetooth_classic_host_is_connected());
+    return PBSYS_HMI_EV3_UI_ACTION_REFRESH_SOON;
+}
+
+static pbsys_hmi_ev3_ui_action_t pbsys_hmi_ev3_ui_handle_host_open(void) {
+    state.overlay = PBSYS_HMI_EV3_UI_OVERLAY_HOST;
+    return pbsys_hmi_ev3_ui_handle_host_button(0);
+}
+
+/**
+ * Gamepad overlay phase.
+ *
+ * Gamepads have no user interface of their own, so the hub scans for them and
+ * initiates pairing, which is the opposite of how a computer is added.
+ */
+typedef enum {
+    /** Gamepad is paired and connected. */
+    PBSYS_HMI_EV3_UI_GAMEPAD_PHASE_READY,
+    /** Scanning for gamepads and browsing the results. */
+    PBSYS_HMI_EV3_UI_GAMEPAD_PHASE_SCAN,
+    /** Connecting to the selected gamepad. */
+    PBSYS_HMI_EV3_UI_GAMEPAD_PHASE_CONNECT,
+    /** Connection attempt timed out. */
+    PBSYS_HMI_EV3_UI_GAMEPAD_PHASE_FAILED,
+} pbsys_hmi_ev3_ui_gamepad_phase_t;
 
 static struct {
-    /** The kind of device currently managed in the overlay. */
-    const pbsys_hmi_ev3_ui_device_config_t *config;
-    pbsys_hmi_ev3_ui_device_phase_t phase;
-    /** Name of the device being paired with or already in use. */
+    pbsys_hmi_ev3_ui_gamepad_phase_t phase;
+    /** Name of the gamepad being paired with or already in use. */
     char name[PBIO_BLUETOOTH_CLASSIC_NAME_SIZE];
     uint32_t selected_scan;
-} device_ui;
+} gamepad_ui;
 
-static pbsys_hmi_ev3_ui_action_t pbsys_hmi_ev3_ui_handle_device_button(pbio_button_flags_t button) {
+static pbsys_hmi_ev3_ui_action_t pbsys_hmi_ev3_ui_handle_gamepad_button(pbio_button_flags_t button) {
 
-    const pbsys_hmi_ev3_ui_device_config_t *config = device_ui.config;
+    switch (gamepad_ui.phase) {
 
-    switch (device_ui.phase) {
-
-        case PBSYS_HMI_EV3_UI_DEVICE_PHASE_READY: {
+        case PBSYS_HMI_EV3_UI_GAMEPAD_PHASE_READY: {
             if (button == PBIO_BUTTON_LEFT_UP || button == PBIO_BUTTON_CENTER) {
                 state.overlay = PBSYS_HMI_EV3_UI_OVERLAY_NONE;
                 return PBSYS_HMI_EV3_UI_ACTION_NONE;
@@ -282,7 +293,7 @@ static pbsys_hmi_ev3_ui_action_t pbsys_hmi_ev3_ui_handle_device_button(pbio_butt
             return PBSYS_HMI_EV3_UI_ACTION_REFRESH_SOON;
         }
 
-        case PBSYS_HMI_EV3_UI_DEVICE_PHASE_SCAN: {
+        case PBSYS_HMI_EV3_UI_GAMEPAD_PHASE_SCAN: {
             if (button == PBIO_BUTTON_LEFT_UP) {
                 pbdrv_bluetooth_inquiry_stop();
                 state.overlay = PBSYS_HMI_EV3_UI_OVERLAY_NONE;
@@ -303,44 +314,44 @@ static pbsys_hmi_ev3_ui_action_t pbsys_hmi_ev3_ui_handle_device_button(pbio_butt
             }
 
             if (button == PBIO_BUTTON_LEFT) {
-                device_ui.selected_scan = (device_ui.selected_scan + num_results - 1) % num_results;
+                gamepad_ui.selected_scan = (gamepad_ui.selected_scan + num_results - 1) % num_results;
             }
             if (button == PBIO_BUTTON_RIGHT) {
-                device_ui.selected_scan = (device_ui.selected_scan + 1) % num_results;
+                gamepad_ui.selected_scan = (gamepad_ui.selected_scan + 1) % num_results;
             }
-            if (button == PBIO_BUTTON_CENTER && device_ui.selected_scan < num_results) {
-                // Start pairing with the selected device. The driver
+            if (button == PBIO_BUTTON_CENTER && gamepad_ui.selected_scan < num_results) {
+                // Start pairing with the selected gamepad. The driver
                 // registers the bonding record and stores the negotiated
-                // link key into it. This is refused if a device of this kind
-                // connected while we were scanning.
-                pbio_bluetooth_inquiry_result_t *result = &results[device_ui.selected_scan];
+                // link key into it. This is refused if a gamepad connected
+                // while we were scanning.
+                pbio_bluetooth_inquiry_result_t *result = &results[gamepad_ui.selected_scan];
                 pbdrv_bluetooth_inquiry_stop();
-                snprintf(device_ui.name, sizeof(device_ui.name), "%s", result->name);
-                device_ui.phase = config->pair(result->bdaddr, result->name) == PBIO_SUCCESS ?
-                    PBSYS_HMI_EV3_UI_DEVICE_PHASE_CONNECT : PBSYS_HMI_EV3_UI_DEVICE_PHASE_FAILED;
+                snprintf(gamepad_ui.name, sizeof(gamepad_ui.name), "%s", result->name);
+                gamepad_ui.phase = pbdrv_bluetooth_classic_hid_pair(result->bdaddr, result->name) == PBIO_SUCCESS ?
+                    PBSYS_HMI_EV3_UI_GAMEPAD_PHASE_CONNECT : PBSYS_HMI_EV3_UI_GAMEPAD_PHASE_FAILED;
             }
             return PBSYS_HMI_EV3_UI_ACTION_REFRESH_SOON;
         }
 
-        case PBSYS_HMI_EV3_UI_DEVICE_PHASE_CONNECT: {
-            pbio_error_t err = config->pair_status();
+        case PBSYS_HMI_EV3_UI_GAMEPAD_PHASE_CONNECT: {
+            pbio_error_t err = pbdrv_bluetooth_classic_hid_pair_status();
             if (err == PBIO_SUCCESS) {
-                device_ui.phase = PBSYS_HMI_EV3_UI_DEVICE_PHASE_READY;
+                gamepad_ui.phase = PBSYS_HMI_EV3_UI_GAMEPAD_PHASE_READY;
                 return PBSYS_HMI_EV3_UI_ACTION_REFRESH_SOON;
             }
             if (button == PBIO_BUTTON_LEFT_UP || err == PBIO_ERROR_CANCELED) {
                 // Cancelled here or externally (e.g. a program started).
-                config->pair_cancel();
+                pbdrv_bluetooth_classic_hid_pair_cancel();
                 state.overlay = PBSYS_HMI_EV3_UI_OVERLAY_NONE;
                 return PBSYS_HMI_EV3_UI_ACTION_NONE;
             }
             if (err != PBIO_ERROR_AGAIN) {
-                device_ui.phase = PBSYS_HMI_EV3_UI_DEVICE_PHASE_FAILED;
+                gamepad_ui.phase = PBSYS_HMI_EV3_UI_GAMEPAD_PHASE_FAILED;
             }
             return PBSYS_HMI_EV3_UI_ACTION_REFRESH_SOON;
         }
 
-        case PBSYS_HMI_EV3_UI_DEVICE_PHASE_FAILED:
+        case PBSYS_HMI_EV3_UI_GAMEPAD_PHASE_FAILED:
         default: {
             if (button == PBIO_BUTTON_LEFT_UP) {
                 state.overlay = PBSYS_HMI_EV3_UI_OVERLAY_NONE;
@@ -348,29 +359,28 @@ static pbsys_hmi_ev3_ui_action_t pbsys_hmi_ev3_ui_handle_device_button(pbio_butt
             }
             if (button == PBIO_BUTTON_CENTER) {
                 // Acknowledged, so scan again.
-                device_ui.phase = PBSYS_HMI_EV3_UI_DEVICE_PHASE_SCAN;
+                gamepad_ui.phase = PBSYS_HMI_EV3_UI_GAMEPAD_PHASE_SCAN;
             }
             return PBSYS_HMI_EV3_UI_ACTION_REFRESH_SOON;
         }
     }
 }
 
-static pbsys_hmi_ev3_ui_action_t pbsys_hmi_ev3_ui_handle_device_open(const pbsys_hmi_ev3_ui_device_config_t *config) {
-    state.overlay = PBSYS_HMI_EV3_UI_OVERLAY_DEVICE;
-    device_ui.config = config;
-    // Only one device of each kind can be connected, so if there already is
-    // one, say so instead of offering to pair another that would be rejected.
+static pbsys_hmi_ev3_ui_action_t pbsys_hmi_ev3_ui_handle_gamepad_open(void) {
+    state.overlay = PBSYS_HMI_EV3_UI_OVERLAY_GAMEPAD;
+    // Only one gamepad can be connected, so if there already is one, say so
+    // instead of offering to pair another that would be rejected.
     const char *name = NULL;
-    if (config->is_connected()) {
-        device_ui.phase = PBSYS_HMI_EV3_UI_DEVICE_PHASE_READY;
-        name = config->get_connected_name();
+    if (pbdrv_bluetooth_classic_hid_is_connected()) {
+        gamepad_ui.phase = PBSYS_HMI_EV3_UI_GAMEPAD_PHASE_READY;
+        name = pbdrv_bluetooth_classic_hid_get_connected_name();
     } else {
-        device_ui.phase = PBSYS_HMI_EV3_UI_DEVICE_PHASE_SCAN;
+        gamepad_ui.phase = PBSYS_HMI_EV3_UI_GAMEPAD_PHASE_SCAN;
     }
-    snprintf(device_ui.name, sizeof(device_ui.name), "%s", name ? name : "Unknown device");
-    device_ui.selected_scan = 0;
+    snprintf(gamepad_ui.name, sizeof(gamepad_ui.name), "%s", name ? name : "Unknown device");
+    gamepad_ui.selected_scan = 0;
 
-    return pbsys_hmi_ev3_ui_handle_device_button(0);
+    return pbsys_hmi_ev3_ui_handle_gamepad_button(0);
 }
 
 /**
@@ -390,6 +400,8 @@ pbsys_hmi_ev3_ui_action_t pbsys_hmi_ev3_ui_handle_button(pbio_button_flags_t but
     // Given the current state of the overlay and the button that is pressed,
     // update the state and return an action if applicable.
     switch (state.overlay) {
+        case PBSYS_HMI_EV3_UI_OVERLAY_INFO:
+            return pbsys_hmi_ev3_ui_handle_info_button(button);
         case PBSYS_HMI_EV3_UI_OVERLAY_NO_PROGRAM:
         // fallthrough
         case PBSYS_HMI_EV3_UI_OVERLAY_COMING_SOON:
@@ -419,8 +431,10 @@ pbsys_hmi_ev3_ui_action_t pbsys_hmi_ev3_ui_handle_button(pbio_button_flags_t but
                 state.overlay = PBSYS_HMI_EV3_UI_OVERLAY_SHUTDOWN_YES;
             }
             return PBSYS_HMI_EV3_UI_ACTION_NONE;
-        case PBSYS_HMI_EV3_UI_OVERLAY_DEVICE:
-            return pbsys_hmi_ev3_ui_handle_device_button(button);
+        case PBSYS_HMI_EV3_UI_OVERLAY_HOST:
+            return pbsys_hmi_ev3_ui_handle_host_button(button);
+        case PBSYS_HMI_EV3_UI_OVERLAY_GAMEPAD:
+            return pbsys_hmi_ev3_ui_handle_gamepad_button(button);
         case PBSYS_HMI_EV3_UI_OVERLAY_NONE:
         // fallthrough
         default:
@@ -474,10 +488,13 @@ pbsys_hmi_ev3_ui_action_t pbsys_hmi_ev3_ui_handle_button(pbio_button_flags_t but
             }
         } else if (state.tab == PBSYS_HMI_EV3_UI_TAB_SETTINGS) {
             switch (state.selection[PBSYS_HMI_EV3_UI_TAB_SETTINGS]) {
+                case 0:
+                    state.overlay = PBSYS_HMI_EV3_UI_OVERLAY_INFO;
+                    return pbsys_hmi_ev3_ui_handle_info_button(0);
                 case 1:
-                    return pbsys_hmi_ev3_ui_handle_device_open(&host_config);
+                    return pbsys_hmi_ev3_ui_handle_host_open();
                 case 2:
-                    return pbsys_hmi_ev3_ui_handle_device_open(&gamepad_config);
+                    return pbsys_hmi_ev3_ui_handle_gamepad_open();
                 default:
                     // Other settings have no info.
                     return PBSYS_HMI_EV3_UI_ACTION_NONE;
@@ -517,6 +534,38 @@ static void pbsys_hmi_ev3_ui_draw_centered_text(const pbio_font_t *font, const c
     pbio_image_bbox_text(font, text, strlen(text), &rect);
     int x = (display->width - rect.width) / 2 + x_offset;
     pbio_image_draw_text(display, font, x, y, text, strlen(text), BLACK);
+}
+
+/**
+ * Draws text, cut off with an ellipsis if it does not fit the given width.
+ *
+ * Only used for the hub name, which is what the scratch buffer is sized for.
+ *
+ * @param [in] font       Font to use for drawing.
+ * @param [in] text       Text string.
+ * @param [in] x          X coordinate of the left of the text.
+ * @param [in] y          Y coordinate of the baseline.
+ * @param [in] max_width  Width available for the text.
+ */
+static void pbsys_hmi_ev3_ui_draw_truncated_text(const pbio_font_t *font, const char *text, int x, int y, int max_width) {
+    pbio_image_t *display = pbdrv_display_get_image();
+    pbio_image_rect_t rect;
+    size_t len = strlen(text);
+
+    pbio_image_bbox_text(font, text, len, &rect);
+    if (rect.width <= max_width) {
+        pbio_image_draw_text(display, font, x, y, text, len, BLACK);
+        return;
+    }
+
+    // Drop characters until the text and the ellipsis together fit.
+    char buf[PBSYS_HOST_HUB_NAME_SIZE + 3];
+    do {
+        snprintf(buf, sizeof(buf), "%.*s...", (int)--len, text);
+        pbio_image_bbox_text(font, buf, strlen(buf), &rect);
+    } while (len > 0 && rect.width > max_width);
+
+    pbio_image_draw_text(display, font, x, y, buf, strlen(buf), BLACK);
 }
 
 static uint8_t pbsys_hmi_ev3_ui_draw_overlay_box(uint8_t width, uint8_t height, bool divider) {
@@ -615,53 +664,72 @@ static void pbsys_hmi_ev3_ui_draw_device_name(const pbio_font_t *font, const cha
 }
 
 /**
+ * Draws the sweeping activity animation, centered on the given line.
+ */
+static void pbsys_hmi_ev3_ui_draw_activity_animation(int y) {
+    static uint8_t counter;
+    counter = counter > 60 ? 0 : counter + 1;
+    pbio_image_draw_hline(pbdrv_display_get_image(), 178 / 2 - counter, y, counter * 2, BLACK);
+}
+
+/**
  * Draws the sweeping activity animation with a status text above it.
  */
 static void pbsys_hmi_ev3_ui_draw_activity_status(const char *text) {
-    static uint8_t counter;
-    counter = counter > 60 ? 0 : counter + 1;
-    pbio_image_draw_hline(pbdrv_display_get_image(), 178 / 2 - counter, 44, counter * 2, BLACK);
+    pbsys_hmi_ev3_ui_draw_activity_animation(44);
     pbsys_hmi_ev3_ui_draw_centered_text(&pbio_font_liberationsans_regular_14, text, 0, 40);
 }
 
-static void pbsys_hmi_ev3_ui_draw_device_overlay(void) {
+static void pbsys_hmi_ev3_ui_draw_host_overlay(void) {
 
-    const pbsys_hmi_ev3_ui_device_config_t *config = device_ui.config;
+    const pbio_font_t *font = &pbio_font_liberationsans_regular_14;
+
+    // The same gate as the Bluetooth icon in the status bar.
+    if (pbdrv_bluetooth_classic_host_is_connected()) {
+        uint8_t separator_y = pbsys_hmi_ev3_ui_draw_overlay_box(160, 100, true);
+        pbsys_hmi_ev3_ui_draw_centered_text(font, "Already connected!", 0, 60);
+        pbsys_hmi_ev3_ui_draw_overlay_box_draw_accept(separator_y);
+        return;
+    }
+
+    pbsys_hmi_ev3_ui_draw_overlay_box(160, 100, false);
+    pbsys_hmi_ev3_ui_draw_centered_text(font, "Connect with the", 0, 48);
+    pbsys_hmi_ev3_ui_draw_centered_text(font, "Bluetooth menu", 0, 66);
+    pbsys_hmi_ev3_ui_draw_centered_text(font, "on your computer", 0, 84);
+    pbsys_hmi_ev3_ui_draw_activity_animation(104);
+}
+
+static void pbsys_hmi_ev3_ui_draw_gamepad_overlay(void) {
+
+    const pbio_font_t *font = &pbio_font_liberationsans_regular_14;
 
     char buf[PBIO_BLUETOOTH_CLASSIC_NAME_SIZE + 4];
 
-    switch (device_ui.phase) {
+    switch (gamepad_ui.phase) {
 
-        case PBSYS_HMI_EV3_UI_DEVICE_PHASE_READY: {
+        case PBSYS_HMI_EV3_UI_GAMEPAD_PHASE_READY: {
             uint8_t separator_y = pbsys_hmi_ev3_ui_draw_overlay_box(160, 100, true);
-            pbsys_hmi_ev3_ui_draw_device_name(&pbio_font_liberationsans_regular_14, device_ui.name, 44, 60, 150, false);
-            pbsys_hmi_ev3_ui_draw_centered_text(&pbio_font_liberationsans_regular_14, "Ready for use", 0, 80);
+            pbsys_hmi_ev3_ui_draw_device_name(font, gamepad_ui.name, 44, 60, 150, false);
+            pbsys_hmi_ev3_ui_draw_centered_text(font, "Ready for use", 0, 80);
             pbsys_hmi_ev3_ui_draw_overlay_box_draw_accept(separator_y);
             return;
         }
 
-        case PBSYS_HMI_EV3_UI_DEVICE_PHASE_CONNECT: {
+        case PBSYS_HMI_EV3_UI_GAMEPAD_PHASE_CONNECT: {
             pbsys_hmi_ev3_ui_draw_overlay_box(160, 100, false);
-            uint32_t passkey;
-            if (config->pair_passkey && config->pair_passkey(&passkey)) {
-                // Same passkey as in the confirmation prompt on the host.
-                snprintf(buf, sizeof(buf), "Confirm %06u", (unsigned int)passkey);
-                pbsys_hmi_ev3_ui_draw_activity_status(buf);
-            } else {
-                pbsys_hmi_ev3_ui_draw_activity_status(config->connect_text);
-            }
-            pbsys_hmi_ev3_ui_draw_device_name(&pbio_font_liberationsans_regular_14, device_ui.name, 64, 80, 150, false);
+            pbsys_hmi_ev3_ui_draw_activity_status("Connecting...");
+            pbsys_hmi_ev3_ui_draw_device_name(font, gamepad_ui.name, 64, 80, 150, false);
             return;
         }
 
-        case PBSYS_HMI_EV3_UI_DEVICE_PHASE_FAILED: {
+        case PBSYS_HMI_EV3_UI_GAMEPAD_PHASE_FAILED: {
             uint8_t separator_y = pbsys_hmi_ev3_ui_draw_overlay_box(160, 100, true);
-            pbsys_hmi_ev3_ui_draw_centered_text(&pbio_font_liberationsans_regular_14, "Connection failed", 0, 55);
+            pbsys_hmi_ev3_ui_draw_centered_text(font, "Connection failed", 0, 55);
             pbsys_hmi_ev3_ui_draw_overlay_box_draw_accept(separator_y);
             return;
         }
 
-        case PBSYS_HMI_EV3_UI_DEVICE_PHASE_SCAN:
+        case PBSYS_HMI_EV3_UI_GAMEPAD_PHASE_SCAN:
         default: {
             pbsys_hmi_ev3_ui_draw_overlay_box(160, 100, false);
 
@@ -670,28 +738,90 @@ static void pbsys_hmi_ev3_ui_draw_device_overlay(void) {
             if (pbdrv_bluetooth_inquiry_get_results(&num_results, &results) != PBIO_SUCCESS) {
                 num_results = 0;
             }
-            if (device_ui.selected_scan >= num_results) {
-                device_ui.selected_scan = 0;
+            if (gamepad_ui.selected_scan >= num_results) {
+                gamepad_ui.selected_scan = 0;
             }
 
             // Show scanning action or number of results if any.
             if (num_results == 0) {
-                pbsys_hmi_ev3_ui_draw_activity_status(config->scan_text);
+                pbsys_hmi_ev3_ui_draw_activity_status("Scanning: Gamepad");
                 return;
             }
-            snprintf(buf, sizeof(buf), "Showing %d of %d.", (int)device_ui.selected_scan + 1, (int)num_results);
+            snprintf(buf, sizeof(buf), "Showing %d of %d.", (int)gamepad_ui.selected_scan + 1, (int)num_results);
             pbsys_hmi_ev3_ui_draw_activity_status(buf);
 
             // Selection arrows with the name in between.
-            pbio_bluetooth_inquiry_result_t *result = &results[device_ui.selected_scan];
-            pbsys_hmi_ev3_ui_draw_centered_text(&pbio_font_liberationsans_regular_14, "<", -70, 72);
-            pbsys_hmi_ev3_ui_draw_centered_text(&pbio_font_liberationsans_regular_14, ">", 70, 72);
+            pbio_bluetooth_inquiry_result_t *result = &results[gamepad_ui.selected_scan];
+            pbsys_hmi_ev3_ui_draw_centered_text(font, "<", -70, 72);
+            pbsys_hmi_ev3_ui_draw_centered_text(font, ">", 70, 72);
             pbio_image_fill_rect(pbdrv_display_get_image(), 24, 52, 130, 33, BLACK);
             const char *name = result->name[0] ? result->name : "Unknown device";
-            pbsys_hmi_ev3_ui_draw_device_name(&pbio_font_liberationsans_regular_14, name, 64, 80, 120, true);
+            pbsys_hmi_ev3_ui_draw_device_name(font, name, 64, 80, 120, true);
             return;
         }
     }
+}
+
+/**
+ * Width of the hub information overlay, matching the other large overlays.
+ */
+#define PBSYS_HMI_EV3_UI_INFO_WIDTH (160)
+
+/**
+ * Left edge of the text inside the hub information overlay.
+ */
+#define PBSYS_HMI_EV3_UI_INFO_X ((178 - PBSYS_HMI_EV3_UI_INFO_WIDTH) / 2 + 8)
+
+/**
+ * Draws the hub information overlay.
+ *
+ * The Bluetooth address is what this is mainly for: it is the one thing here
+ * that the user has to copy into their program to reach this brick from
+ * another one, so it gets the big monospace font. There is no bold font, so
+ * the labels and the remaining details are set apart by being small instead.
+ */
+static void pbsys_hmi_ev3_ui_draw_info_overlay(void) {
+
+    pbio_image_t *display = pbdrv_display_get_image();
+
+    uint8_t separator_y = pbsys_hmi_ev3_ui_draw_overlay_box(PBSYS_HMI_EV3_UI_INFO_WIDTH, 100, true);
+
+    const pbio_font_t *label_font = &pbio_font_mono_8x5_8;
+    const pbio_font_t *value_font = &pbio_font_terminus_normal_16;
+    const int x = PBSYS_HMI_EV3_UI_INFO_X;
+
+    char buf[40];
+
+    const char *heading = "Bluetooth address:";
+    pbio_image_draw_text(display, label_font, x, 39, heading, strlen(heading), BLACK);
+
+    uint8_t address[PBDRV_BLUETOOTH_PEER_ADDRESS_SIZE];
+    if (pbdrv_bluetooth_peer_is_ready()) {
+        pbdrv_bluetooth_peer_get_local_address(address);
+        snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+            address[0], address[1], address[2], address[3], address[4], address[5]);
+    } else {
+        // Same shape, so the overlay does not jump when it becomes known.
+        snprintf(buf, sizeof(buf), "--:--:--:--:--:--");
+    }
+    pbio_image_draw_text(display, value_font, x, 57, buf, strlen(buf), BLACK);
+
+    // Plain version for a release, otherwise with the build and commit hash.
+    if (PBIO_VERSION_LEVEL_HEX == 0xF) {
+        snprintf(buf, sizeof(buf), "Firmware: %d.%d.%d",
+            PBIO_VERSION_MAJOR, PBIO_VERSION_MINOR, PBIO_VERSION_MICRO);
+    } else {
+        snprintf(buf, sizeof(buf), "Firmware: %d.%d.%d%x%d-%.6s",
+            PBIO_VERSION_MAJOR, PBIO_VERSION_MINOR, PBIO_VERSION_MICRO,
+            PBIO_VERSION_LEVEL_HEX, PBIO_VERSION_SERIAL, PBIO_VERSION_HASH);
+    }
+    pbio_image_draw_text(display, label_font, x, 75, buf, strlen(buf), BLACK);
+
+    const char *hardware = pbdrv_hardware_get_version();
+    snprintf(buf, sizeof(buf), "Hardware: %s", hardware ? hardware : "Unknown");
+    pbio_image_draw_text(display, label_font, x, 89, buf, strlen(buf), BLACK);
+
+    pbsys_hmi_ev3_ui_draw_overlay_box_draw_accept(separator_y);
 }
 
 /**
@@ -706,8 +836,18 @@ static void pbsys_hmi_ev3_ui_draw_overlay(pbsys_hmi_ev3_ui_overlay_type_t overla
         return;
     }
 
-    if (overlay == PBSYS_HMI_EV3_UI_OVERLAY_DEVICE) {
-        pbsys_hmi_ev3_ui_draw_device_overlay();
+    if (overlay == PBSYS_HMI_EV3_UI_OVERLAY_HOST) {
+        pbsys_hmi_ev3_ui_draw_host_overlay();
+        return;
+    }
+
+    if (overlay == PBSYS_HMI_EV3_UI_OVERLAY_GAMEPAD) {
+        pbsys_hmi_ev3_ui_draw_gamepad_overlay();
+        return;
+    }
+
+    if (overlay == PBSYS_HMI_EV3_UI_OVERLAY_INFO) {
+        pbsys_hmi_ev3_ui_draw_info_overlay();
         return;
     }
 
@@ -826,6 +966,11 @@ void pbsys_hmi_ev3_ui_draw(void) {
         right_align -= pbio_image_media__gamepad_small.width + 2;
         pbio_image_draw_image_transparent_from_monochrome(display, &pbio_image_media__gamepad_small, right_align, 2, BLACK);
     }
+
+    // Hub name on the left, in whatever space the icons leave over. This is
+    // almost always on screen, so the hub information overlay does not repeat
+    // it.
+    pbsys_hmi_ev3_ui_draw_truncated_text(&pbio_font_mono_8x5_8, pbsys_host_get_hub_name(), 2, 9, right_align - 4);
 
     // Draw the overlay on top of everything else.
     pbsys_hmi_ev3_ui_draw_overlay(state.overlay);

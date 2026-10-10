@@ -30,6 +30,15 @@
 #define PBDRV_CONFIG_BATTERY_ADC_TEMPERATURE_CH     2
 
 #define PBDRV_CONFIG_BLUETOOTH                      (1)
+#define PBDRV_CONFIG_BLUETOOTH_LE                   (1)
+// Brick-to-brick messaging is the only Bluetooth Classic feature here. The
+// host computer connection stays on BLE, so there is no RFCOMM serial server,
+// and there is no hub menu to pair a Classic HID gamepad from. Peers connect
+// by address without pairing, so inquiry scanning is not needed either.
+#define PBDRV_CONFIG_BLUETOOTH_PEER                 (1)
+// Matches the F4 Prime hub so a program behaves the same on both. There is
+// RAM to spare here for more, but the baseband ceiling is 7 either way.
+#define PBDRV_CONFIG_BLUETOOTH_PEER_MAX_PEERS       (3)
 #define PBDRV_CONFIG_BLUETOOTH_NUM_PERIPHERALS      (2)
 #define PBDRV_CONFIG_BLUETOOTH_MAX_MTU_SIZE         515
 #define PBDRV_CONFIG_BLUETOOTH_BTSTACK              (1)
@@ -67,6 +76,9 @@
 
 #define PBDRV_CONFIG_GPIO                           (1)
 #define PBDRV_CONFIG_GPIO_STM32                     (1)
+
+#define PBDRV_CONFIG_HARDWARE                       (1)
+#define PBDRV_CONFIG_HARDWARE_STM32                 (1)
 
 #define PBDRV_CONFIG_IMU                            (1)
 #define PBDRV_CONFIG_IMU_LSM6S3TR_C_STM32           (1)

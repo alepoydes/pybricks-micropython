@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2018-2025 The Pybricks Authors
 
+// Implementation of the LEGO UART Messaging Protocol (LUMP).
+//
+// This syncs up with a device, reads its mode information, and exchanges data
+// messages with it. What that data means is implemented in sensors.c.
+
 #include <pbio/config.h>
 
 #if PBIO_CONFIG_PORT_LUMP
@@ -9,29 +14,17 @@
 #include <string.h>
 
 #include <pbio/os.h>
-#include <pbio/util.h>
-
-#include <pbio/color.h>
-#include <pbio/int_math.h>
 #include <pbio/port.h>
 #include <pbio/port_lump.h>
+#include <pbio/util.h>
 
 #include <pbdrv/clock.h>
-#include <pbdrv/ioport.h>
+#include <pbdrv/uart.h>
 
-#include <pbsys/telemetry.h>
+#include <lego/device.h>
+#include <lego/lump.h>
 
-#define DEBUG 0
-#if DEBUG
-#include <stdio.h>
-#include <inttypes.h>
-#include <pbio/debug.h>
-#define debug_pr pbio_debug
-#define DBG_ERR(expr) expr
-#else
-#define debug_pr(...)
-#define DBG_ERR(expr)
-#endif
+#include "lump_dev.h"
 
 #define EV3_UART_MAX_MESSAGE_SIZE   (LUMP_MAX_MSG_SIZE + 3)
 
@@ -98,105 +91,7 @@ enum ev3_uart_info_flags {
         | EV3_UART_INFO_FLAG_INFO_FORMAT,
 };
 
-/**
- * Indicates the current state of the UART device.
- */
-typedef enum {
-    /** Something bad happened. */
-    PBDRV_LEGODEV_LUMP_STATUS_ERR,
-    /** Waiting for data that looks like LEGO UART protocol. */
-    PBDRV_LEGODEV_LUMP_STATUS_SYNCING,
-    /** Reading device info before changing baud rate. */
-    PBDRV_LEGODEV_LUMP_STATUS_INFO,
-    /** ACK received, delay changing baud rate. */
-    PBDRV_LEGODEV_LUMP_STATUS_ACK,
-    /** Ready to send commands and receive data. */
-    PBDRV_LEGODEV_LUMP_STATUS_DATA,
-} pbdrv_legodev_lump_status_t;
-
-typedef struct {
-    /** The mode to be set. */
-    uint8_t desired_mode;
-    /** Whether a mode change was requested (set low when handled). */
-    bool requested;
-    /** Time of switch completion (if info.mode == desired_mode) or time of switch request (if info.mode != desired_mode). */
-    uint32_t time;
-} pbdrv_legodev_lump_mode_switch_t;
-
-typedef struct {
-    /** The data to be set. */
-    uint8_t bin_data[LUMP_MAX_MSG_SIZE]  __attribute__((aligned(4)));
-    /** The size of the data to be set, also acts as set request flag. */
-    uint8_t size;
-    /** The mode at which to set data */
-    uint8_t desired_mode;
-    /** Time of the data set request (if size != 0) or time of completing transmission (if size == 0). */
-    uint32_t time;
-} pbdrv_legodev_lump_data_set_t;
-
-
-// LUMP state for each port.
-struct _pbio_port_lump_dev_t {
-    /** Child protothread of the main protothread used for reading data */
-    pbio_os_state_t read_pt;
-    /** Child protothread of the main protothread used for writing data */
-    pbio_os_state_t write_pt;
-    /** Buffer to hold messages received from the device. */
-    uint8_t *rx_msg;
-    /** Buffer to hold messages transmitted to the device. */
-    uint8_t *tx_msg;
-    /** Data set buffer and status. */
-    pbdrv_legodev_lump_data_set_t *data_set;
-    /**
-     * Most recent binary data read from the device. How to interpret this data
-     * is determined by the ::pbio_port_lump_mode_info_t info associated with the current
-     * *mode* of the device. For example, it could be an array of int32_t and/or
-     * the values could be foreign-endian.
-     */
-    uint8_t *bin_data;
-    /**
-     * NB: Everything below is reset to 0 when synchronizing with a new device.
-     *     type_id field should remain first.
-     */
-    /**< The type identifier of the device. */
-    lego_device_type_id_t type_id;
-    /** The current mode of the device */
-    uint8_t mode;
-    /**< The capabilities and requirements of the device. */
-    uint8_t capabilities;
-    /** The current device connection state. */
-    pbdrv_legodev_lump_status_t status;
-    /** Mode switch status. */
-    pbdrv_legodev_lump_mode_switch_t mode_switch;
-    /** Extra mode adder for Powered Up devices (for modes > LUMP_MAX_MODE). */
-    uint8_t ext_mode;
-    /** New baud rate that will be set with ev3_uart_change_bitrate. */
-    uint32_t new_baud_rate;
-    /** Size of the current message being transmitted. */
-    uint32_t tx_msg_size;
-    /** Size of the current message being received. */
-    uint32_t rx_msg_size;
-    /** Total number of errors that have occurred. Re-used in different stages of synchronization and data reading. */
-    uint32_t err_count;
-    /** Flag that indicates that good DATA lump_dev->msg has been received since last watchdog timeout. */
-    bool data_rec;
-    /** Angle reported by the device. */
-    pbio_angle_t angle;
-    /** Cached sensor calibration data. */
-    int16_t calibration_data[3];
-    #if PBIO_CONFIG_PORT_LUMP_MODE_INFO
-    /** Mode value used to keep track of mode in INFO messages while syncing. */
-    uint8_t new_mode;
-    /** Flags indicating what information has already been read from the data. */
-    uint32_t info_flags;
-    /**< The number of modes */
-    uint8_t num_modes;
-    /**< Information about the current mode. */
-    pbio_port_lump_mode_info_t mode_info[(LUMP_MAX_EXT_MODE + 1)];
-    #endif // PBIO_CONFIG_PORT_LUMP_MODE_INFO
-};
-
-pbio_port_lump_dev_t lump_devices[PBIO_CONFIG_PORT_LUMP_NUM_DEV];
+static pbio_port_lump_dev_t lump_devices[PBIO_CONFIG_PORT_LUMP_NUM_DEV];
 
 enum {
     BUF_TX_MSG,
@@ -208,7 +103,7 @@ static uint8_t bufs[PBIO_CONFIG_PORT_LUMP_NUM_DEV][NUM_BUF][EV3_UART_MAX_MESSAGE
 
 // The following data is really just part of lump_devices, but separate allocation reduces overal code size
 static uint8_t data_read_bufs[PBIO_CONFIG_PORT_LUMP_NUM_DEV][LUMP_MAX_MSG_SIZE] __attribute__((aligned(4)));
-static pbdrv_legodev_lump_data_set_t data_set_bufs[PBIO_CONFIG_PORT_LUMP_NUM_DEV];
+static pbio_port_lump_data_set_t data_set_bufs[PBIO_CONFIG_PORT_LUMP_NUM_DEV];
 
 pbio_port_lump_dev_t *pbio_port_lump_init_instance(uint8_t device_index) {
     if (device_index >= PBIO_CONFIG_PORT_LUMP_NUM_DEV) {
@@ -217,14 +112,56 @@ pbio_port_lump_dev_t *pbio_port_lump_init_instance(uint8_t device_index) {
     pbio_port_lump_dev_t *lump_dev = &lump_devices[device_index];
     lump_dev->tx_msg = &bufs[device_index][BUF_TX_MSG][0];
     lump_dev->rx_msg = &bufs[device_index][BUF_RX_MSG][0];
-    lump_dev->status = PBDRV_LEGODEV_LUMP_STATUS_ERR;
+    lump_dev->status = PBIO_PORT_LUMP_STATUS_ERR;
     lump_dev->err_count = 0;
     lump_dev->data_set = &data_set_bufs[device_index];
     lump_dev->bin_data = data_read_bufs[device_index];
+    lump_dev->index = device_index;
     return lump_dev;
 }
 
-static void pbio_port_lump_request_mode(pbio_port_lump_dev_t *lump_dev, uint8_t mode) {
+/**
+ * Resets all state that is accumulated while a device is attached, so that we
+ * can start syncing with a (new) device without inheriting anything from the
+ * device that was attached before.
+ *
+ * The buffer pointers and the port index are not part of this, since they are
+ * set once when the instance is created.
+ *
+ * @param [in]  lump_dev    The LEGO UART device instance.
+ */
+static void pbio_port_lump_reset(pbio_port_lump_dev_t *lump_dev) {
+
+    lump_dev->status = PBIO_PORT_LUMP_STATUS_SYNCING;
+    lump_dev->type_id = LEGO_DEVICE_TYPE_ID_NONE;
+    lump_dev->mode = 0;
+    lump_dev->ext_mode = 0;
+    lump_dev->capabilities = 0;
+    lump_dev->new_baud_rate = EV3_UART_SPEED_LPF2;
+    lump_dev->tx_msg_size = 0;
+    lump_dev->rx_msg_size = 0;
+    lump_dev->err_count = 0;
+    lump_dev->data_rec = false;
+
+    lump_dev->mode_switch.desired_mode = 0;
+    lump_dev->mode_switch.requested = false;
+    lump_dev->mode_switch.time = 0;
+
+    lump_dev->data_set->desired_mode = 0;
+    lump_dev->data_set->size = 0;
+    lump_dev->data_set->time = 0;
+
+    #if PBIO_CONFIG_PORT_LUMP_MODE_INFO
+    lump_dev->new_mode = 0;
+    lump_dev->num_modes = 0;
+    lump_dev->info_flags = 0;
+    // Mode info is filled in message by message, so anything not sent by the
+    // new device must not be left over from the previous one.
+    memset(lump_dev->mode_info, 0, sizeof(lump_dev->mode_info));
+    #endif
+}
+
+void pbio_port_lump_request_mode(pbio_port_lump_dev_t *lump_dev, uint8_t mode) {
     debug_pr("req mode: %d (was: %d desired: %d)\n", mode, lump_dev->mode, lump_dev->mode_switch.desired_mode);
     lump_dev->mode_switch.desired_mode = mode;
     lump_dev->mode_switch.time = pbdrv_clock_get_ms();
@@ -262,304 +199,6 @@ static uint8_t ev3_uart_get_msg_size(uint8_t header) {
     return size;
 }
 
-
-static bool pbio_port_lump_is_relative_motor(pbio_port_lump_dev_t *lump_dev) {
-    return (lump_dev->type_id == LEGO_DEVICE_TYPE_ID_INTERACTIVE_MOTOR) &&
-           (lump_dev->mode == LEGO_DEVICE_MODE_PUP_REL_MOTOR__POS);
-}
-
-static bool pbio_port_lump_is_absolute_motor(pbio_port_lump_dev_t *lump_dev) {
-    return (lump_dev->capabilities & LUMP_MODE_FLAGS0_MOTOR_ABS_POS) &&
-           (lump_dev->mode == LEGO_DEVICE_MODE_PUP_ABS_MOTOR__CALIB);
-}
-
-/**
- * Handles incoming motor position data.
- *
- * @param [in] lump_dev The lump device with new data.
- */
-static void pbio_port_lump_handle_known_data(pbio_port_lump_dev_t *lump_dev) {
-
-    // Set some initial colors for this device. Can only be done some time
-    // after initially plugged in, so wait a few samples.
-    if (lump_dev->type_id == LEGO_DEVICE_TYPE_ID_TECHNIC_COLOR_LIGHT_MATRIX && lump_dev->calibration_data[0] < 2) {
-        if (lump_dev->calibration_data[0]++ == 1) {
-            const uint8_t rainbow[] = {0xa9, 0xa8, 0xa7, 0xa1, 0xaa, 0xa6, 0xa2, 0xa3, 0xa4};
-            pbio_port_lump_set_mode_with_data(lump_dev, LEGO_DEVICE_MODE_PUP_COLOR_LIGHT_MATRIX__PIX_O, (uint8_t *)rainbow, sizeof(rainbow));
-        }
-    }
-
-    // Handles LUMP motors in a mode that reports an absolute angle in decidegrees (0--3600).
-    if (pbio_port_lump_is_absolute_motor(lump_dev)) {
-
-        int32_t abs_mdeg = ((int16_t)pbio_get_uint16_le(lump_dev->bin_data + 2)) * 100;
-
-        // Store measured millidegree state value as-is but keep old value.
-        int32_t abs_prev = lump_dev->angle.millidegrees;
-        lump_dev->angle.millidegrees = abs_mdeg;
-
-        // Update rotation counter as encoder passes through multiples of 360.
-        if (abs_prev > 270000 && abs_mdeg < 90000) {
-            lump_dev->angle.rotations += 1;
-        }
-        if (abs_prev < 90000 && abs_mdeg > 270000) {
-            lump_dev->angle.rotations -= 1;
-        }
-    }
-
-    // Handles only known LUMP motor that reports incremental angle in degrees.
-    if (pbio_port_lump_is_relative_motor(lump_dev)) {
-        int32_t degrees = pbio_get_uint32_le(lump_dev->bin_data);
-        lump_dev->angle.millidegrees = (degrees % 360) * 1000;
-        lump_dev->angle.rotations = degrees / 360;
-    }
-
-    // Only the force sensor currently caches calibration constants to
-    // preprocess values. Could be enlarged to cover other sensors.
-    if (lump_dev->type_id == LEGO_DEVICE_TYPE_ID_SPIKE_FORCE_SENSOR &&
-        lump_dev->mode == LEGO_DEVICE_MODE_PUP_FORCE_SENSOR__CALIB) {
-        lump_dev->calibration_data[0] = ((int16_t)pbio_get_uint16_le(lump_dev->bin_data + 2)); // Raw offset.
-        lump_dev->calibration_data[1] = ((int16_t)pbio_get_uint16_le(lump_dev->bin_data + 4)); // Raw released.
-        lump_dev->calibration_data[2] = ((int16_t)pbio_get_uint16_le(lump_dev->bin_data + 12)); // Raw end.
-        pbio_port_lump_request_mode(lump_dev, LEGO_DEVICE_MODE_PUP_FORCE_SENSOR__FRAW);
-    }
-}
-
-pbio_error_t pbio_port_lump_get_force(pbio_port_lump_dev_t *lump_dev, int32_t *force, int32_t *distance) {
-    // Need to be up and running so we don't return stale data.
-    pbio_error_t err = pbio_port_lump_is_ready(lump_dev);
-    if (err != PBIO_SUCCESS) {
-        return err;
-    }
-
-    // Only available on force sensor.
-    if (lump_dev->type_id != LEGO_DEVICE_TYPE_ID_SPIKE_FORCE_SENSOR ||
-        lump_dev->mode != LEGO_DEVICE_MODE_PUP_FORCE_SENSOR__FRAW) {
-        return PBIO_ERROR_NO_DEV;
-    }
-
-    int16_t offset = lump_dev->calibration_data[0];
-    int16_t released = lump_dev->calibration_data[1];
-    int16_t end = lump_dev->calibration_data[2];
-
-    // Fail on bad calibration data (released >= end)
-    if (released >= end) {
-        return PBIO_ERROR_FAILED;
-    }
-
-    int16_t raw = (int16_t)pbio_get_uint16_le(lump_dev->bin_data);
-
-    // micrometers
-    *distance = (6670 * (raw - released)) / (end - released);
-
-    // millinewtons, counting from calibrated offset.
-    *force = (10000 * (raw - released - offset)) / (end - released);
-    if (*force < 0) {
-        *force = 0;
-    }
-    return PBIO_SUCCESS;
-}
-
-pbio_error_t pbio_port_lump_get_angle(pbio_port_lump_dev_t *lump_dev, pbio_angle_t *angle, bool get_abs_angle) {
-
-    // Need to be up and running so we don't return stale data.
-    pbio_error_t err = pbio_port_lump_is_ready(lump_dev);
-    if (err != PBIO_SUCCESS) {
-        return err;
-    }
-
-    // Only motors have angles.
-    if (!pbio_port_lump_is_relative_motor(lump_dev) && !pbio_port_lump_is_absolute_motor(lump_dev)) {
-        return PBIO_ERROR_NO_DEV;
-    }
-
-    // Handle request for absolute angle.
-    if (get_abs_angle) {
-        if (!pbio_port_lump_is_absolute_motor(lump_dev)) {
-            return PBIO_ERROR_NOT_SUPPORTED;
-        }
-
-        // Mod the angle to be in the range [-180, 180).
-        angle->rotations = 0;
-        angle->millidegrees = lump_dev->angle.millidegrees;
-        if (angle->millidegrees >= 180000) {
-            angle->millidegrees -= 360000;
-        }
-        return PBIO_SUCCESS;
-    }
-
-    // Otherwise return angle as-is.
-    *angle = lump_dev->angle;
-    return PBIO_SUCCESS;
-}
-
-/**
- * Gets the color measured by a LEGO UART color sensor, in a device independent
- * HSV format that is comparable across sensors.
- *
- * This does not change modes. The caller is responsible for first selecting
- * the mode that provides the requested measurement.
- *
- * @param [in]  lump_dev    The LEGO UART device instance.
- * @param [out] color_hsv   The measured color.
- * @param [in]  reflected   Whether to measure the surface lit by the sensor
- *                          light (true) or the ambient light (false).
- * @return                  ::PBIO_SUCCESS on success.
- *                          ::PBIO_ERROR_NOT_SUPPORTED if this device cannot
- *                          measure color in this way.
- *                          ::PBIO_ERROR_INVALID_OP if the device is not in the
- *                          mode that provides this measurement.
- *                          Otherwise see ::pbio_port_lump_is_ready.
- */
-pbio_error_t pbio_port_lump_get_color(pbio_port_lump_dev_t *lump_dev, pbio_color_t *color_hsv, bool reflected) {
-
-    // Need to be up and running so we don't return stale data.
-    pbio_error_t err = pbio_port_lump_is_ready(lump_dev);
-    if (err != PBIO_SUCCESS) {
-        return err;
-    }
-
-    const int16_t *data = (const int16_t *)lump_dev->bin_data;
-
-    if (lump_dev->type_id == LEGO_DEVICE_TYPE_ID_SPIKE_COLOR_SENSOR) {
-
-        if (!reflected) {
-            if (lump_dev->mode != LEGO_DEVICE_MODE_PUP_COLOR_SENSOR__SHSV) {
-                return PBIO_ERROR_INVALID_OP;
-            }
-            // Saturation and value are 0--10000, scaled to match the 0--100
-            // range that is typical in applications.
-            *color_hsv = PBIO_COLOR_ENCODE(data[0],
-                pbio_int_math_min(data[1] / 10, 100),
-                pbio_int_math_min(data[2] / 10, 100));
-            return PBIO_SUCCESS;
-        }
-
-        if (lump_dev->mode != LEGO_DEVICE_MODE_PUP_COLOR_SENSOR__RGB_I) {
-            return PBIO_ERROR_INVALID_OP;
-        }
-        const pbio_color_rgb_t rgb = {
-            .r = data[0] == 1024 ? 255 : data[0] >> 2,
-            .g = data[1] == 1024 ? 255 : data[1] >> 2,
-            .b = data[2] == 1024 ? 255 : data[2] >> 2,
-        };
-        pbio_color_t hsv = pbio_color_from_rgb_with_hue_shift(&rgb);
-        uint8_t s = pbio_color_get_s(hsv);
-        int8_t v = pbio_color_get_v(hsv);
-        *color_hsv = PBIO_COLOR_ENCODE(pbio_color_get_h(hsv),
-            // Approximately double saturation for low values to get similar
-            // results as other sensors.
-            s * (200 - s) / 100,
-            // Approximately +50% low values to get similar results as with
-            // other sensors.
-            v * (150 - v / 2) / 100);
-        return PBIO_SUCCESS;
-    }
-
-    if (lump_dev->type_id == LEGO_DEVICE_TYPE_ID_COLOR_DIST_SENSOR) {
-
-        // This sensor measures ambient light intensity but not ambient color.
-        if (!reflected) {
-            return PBIO_ERROR_NOT_SUPPORTED;
-        }
-
-        if (lump_dev->mode != LEGO_DEVICE_MODE_PUP_COLOR_DISTANCE_SENSOR__RGB_I) {
-            return PBIO_ERROR_INVALID_OP;
-        }
-        // Max observed value is ~440 so we scale to get a range of 0..255.
-        const pbio_color_rgb_t rgb = {
-            .r = 1187 * data[0] / 2048,
-            .g = 1187 * data[1] / 2048,
-            .b = 1187 * data[2] / 2048,
-        };
-        pbio_color_t hsv = pbio_color_from_rgb_with_hue_shift(&rgb);
-        int8_t v = pbio_color_get_v(hsv);
-        // Approximately double low values to get similar results as with other
-        // sensors.
-        *color_hsv = PBIO_COLOR_ENCODE(pbio_color_get_h(hsv), pbio_color_get_s(hsv), v * (200 - v) / 100);
-        return PBIO_SUCCESS;
-    }
-
-    // The EV3 Color Sensor has no equalized or calibrated RGB output, so its
-    // own color index is used instead of a color map.
-    return PBIO_ERROR_NOT_SUPPORTED;
-}
-
-/**
- * Gets the light intensity measured by a LEGO UART sensor, in permille.
- *
- * This does not change modes. The caller is responsible for first selecting
- * the mode that provides the requested measurement.
- *
- * @param [in]  lump_dev    The LEGO UART device instance.
- * @param [out] intensity   The measured intensity, 0--1000.
- * @param [in]  reflected   Whether to measure the surface lit by the sensor
- *                          light (true) or the ambient light (false).
- * @return                  ::PBIO_SUCCESS on success.
- *                          ::PBIO_ERROR_NOT_SUPPORTED if this device cannot
- *                          measure light intensity in this way.
- *                          ::PBIO_ERROR_INVALID_OP if the device is not in the
- *                          mode that provides this measurement.
- *                          Otherwise see ::pbio_port_lump_is_ready.
- */
-pbio_error_t pbio_port_lump_get_light_intensity(pbio_port_lump_dev_t *lump_dev, int32_t *intensity, bool reflected) {
-
-    // Need to be up and running so we don't return stale data.
-    pbio_error_t err = pbio_port_lump_is_ready(lump_dev);
-    if (err != PBIO_SUCCESS) {
-        return err;
-    }
-
-    const int16_t *data16 = (const int16_t *)lump_dev->bin_data;
-    const int8_t *data8 = (const int8_t *)lump_dev->bin_data;
-
-    if (lump_dev->type_id == LEGO_DEVICE_TYPE_ID_SPIKE_COLOR_SENSOR) {
-        if (!reflected) {
-            if (lump_dev->mode != LEGO_DEVICE_MODE_PUP_COLOR_SENSOR__SHSV) {
-                return PBIO_ERROR_INVALID_OP;
-            }
-            // The value component of the ambient color is 0--10000.
-            *intensity = data16[2] / 10;
-            return PBIO_SUCCESS;
-        }
-        if (lump_dev->mode != LEGO_DEVICE_MODE_PUP_COLOR_SENSOR__RGB_I) {
-            return PBIO_ERROR_INVALID_OP;
-        }
-        // Average of the RGB reflections, which each range from 0 to 1024.
-        *intensity = (data16[0] + data16[1] + data16[2]) * 1000 / 3072;
-        return PBIO_SUCCESS;
-    }
-
-    if (lump_dev->type_id == LEGO_DEVICE_TYPE_ID_COLOR_DIST_SENSOR) {
-        if (!reflected) {
-            if (lump_dev->mode != LEGO_DEVICE_MODE_PUP_COLOR_DISTANCE_SENSOR__AMBI) {
-                return PBIO_ERROR_INVALID_OP;
-            }
-            *intensity = data8[0] * 10;
-            return PBIO_SUCCESS;
-        }
-        if (lump_dev->mode != LEGO_DEVICE_MODE_PUP_COLOR_DISTANCE_SENSOR__RGB_I) {
-            return PBIO_ERROR_INVALID_OP;
-        }
-        // The channels can each read higher than the 400 that this scale
-        // assumes, so cap rather than rescale to keep existing values intact.
-        *intensity = pbio_int_math_min((data16[0] + data16[1] + data16[2]) * 10 / 12, 1000);
-        return PBIO_SUCCESS;
-    }
-
-    if (lump_dev->type_id == LEGO_DEVICE_TYPE_ID_EV3_COLOR_SENSOR) {
-        uint8_t mode = reflected ?
-            LEGO_DEVICE_MODE_EV3_COLOR_SENSOR__REFLECT : LEGO_DEVICE_MODE_EV3_COLOR_SENSOR__AMBIENT;
-        if (lump_dev->mode != mode) {
-            return PBIO_ERROR_INVALID_OP;
-        }
-        *intensity = data8[0] * 10;
-        return PBIO_SUCCESS;
-    }
-
-    return PBIO_ERROR_NOT_SUPPORTED;
-}
-
 /**
  * Gets the power requirements of the device.
  *
@@ -567,7 +206,7 @@ pbio_error_t pbio_port_lump_get_light_intensity(pbio_port_lump_dev_t *lump_dev, 
  * @return The power requirements of the device.
  */
 pbio_port_power_requirements_t pbio_port_lump_get_power_requirements(pbio_port_lump_dev_t *lump_dev) {
-    if (!lump_dev || lump_dev->status != PBDRV_LEGODEV_LUMP_STATUS_DATA) {
+    if (!lump_dev || lump_dev->status != PBIO_PORT_LUMP_STATUS_DATA) {
         return PBIO_PORT_POWER_REQUIREMENTS_NONE;
     }
     if (lump_dev->capabilities & LUMP_MODE_FLAGS0_NEEDS_SUPPLY_PIN1) {
@@ -607,19 +246,25 @@ static void pbio_port_lump_lump_parse_msg(pbio_port_lump_dev_t *lump_dev) {
         }
         if (checksum != lump_dev->rx_msg[msg_size - 1]) {
             debug_pr("Bad checksum\n");
-            // if INFO messages are done and we are now receiving data, it is
-            // OK to occasionally have a bad checksum
-            if (lump_dev->status == PBDRV_LEGODEV_LUMP_STATUS_DATA) {
 
-                // The LEGO EV3 color sensor sends bad checksums
-                // for RGB-RAW data (mode 4). The check here could be
-                // improved if someone can find a pattern.
-                if (lump_dev->type_id != LEGO_DEVICE_TYPE_ID_EV3_COLOR_SENSOR
-                    || lump_dev->rx_msg[0] != (LUMP_MSG_TYPE_DATA | LUMP_MSG_SIZE_8 | 4)) {
-                    return;
-                }
-            } else {
+            // While syncing, a bad checksum means we are not actually in sync.
+            if (lump_dev->status != PBIO_PORT_LUMP_STATUS_DATA) {
                 goto err;
+            }
+
+            bool accept_anyway = false;
+
+            #if PBIO_CONFIG_PORT_LUMP_EV3
+            // The LEGO EV3 color sensor sends bad checksums for RGB-RAW data
+            // (mode 4). The check here could be improved if someone can find
+            // a pattern.
+            accept_anyway = lump_dev->type_id == LEGO_DEVICE_TYPE_ID_EV3_COLOR_SENSOR &&
+                lump_dev->rx_msg[0] == (LUMP_MSG_TYPE_DATA | LUMP_MSG_SIZE_8 | 4);
+            #endif
+
+            if (!accept_anyway) {
+                // Drop this message and wait for the next one.
+                return;
             }
         }
     }
@@ -646,7 +291,7 @@ static void pbio_port_lump_lump_parse_msg(pbio_port_lump_dev_t *lump_dev) {
                     lump_dev->mode = lump_dev->new_mode;
                     #endif
 
-                    lump_dev->status = PBDRV_LEGODEV_LUMP_STATUS_ACK;
+                    lump_dev->status = PBIO_PORT_LUMP_STATUS_ACK;
 
                     return;
             }
@@ -668,6 +313,10 @@ static void pbio_port_lump_lump_parse_msg(pbio_port_lump_dev_t *lump_dev) {
                         // Powered Up devices can have an extended mode message that
                         // includes modes > LUMP_MAX_MODE
                         lump_dev->num_modes = lump_dev->rx_msg[3] + 1;
+                    }
+                    if (lump_dev->num_modes > LUMP_MAX_EXT_MODE + 1) {
+                        debug_pr("Number of extended modes is out of range\n");
+                        goto err;
                     }
 
                     debug_pr("num_modes: %d\n", lump_dev->num_modes);
@@ -714,6 +363,14 @@ static void pbio_port_lump_lump_parse_msg(pbio_port_lump_dev_t *lump_dev) {
             }
             break;
         case LUMP_MSG_TYPE_INFO:
+            #if PBIO_CONFIG_PORT_LUMP_MODE_INFO
+            // The mode is derived from bytes sent by the device, so it must be
+            // checked before it is used to index the mode info.
+            if (mode > LUMP_MAX_EXT_MODE) {
+                debug_pr("Received INFO for out of range mode\n");
+                goto err;
+            }
+            #endif
             switch (cmd2) {
                 case LUMP_INFO_NAME: {
                     size_t name_len = 1;
@@ -742,6 +399,7 @@ static void pbio_port_lump_lump_parse_msg(pbio_port_lump_dev_t *lump_dev) {
                     lump_dev->new_mode = mode;
                     lump_dev->info_flags |= EV3_UART_INFO_FLAG_INFO_NAME;
                     strncpy(lump_dev->mode_info[mode].name, name, name_len);
+                    lump_dev->mode_info[mode].name[name_len] = 0;
 
                     debug_pr("new_mode: %d\n", lump_dev->new_mode);
                     debug_pr("flags: %02X %02X %02X %02X %02X %02X\n",
@@ -775,7 +433,6 @@ static void pbio_port_lump_lump_parse_msg(pbio_port_lump_dev_t *lump_dev) {
                     // Mode supports writing if rx_msg[3] is nonzero.
                     lump_dev->mode_info[mode].writable = lump_dev->rx_msg[3] != 0;
 
-                    debug_pr("mapping: in %02x out %02x\n", lump_dev->rx_msg[2], lump_dev->rx_msg[3]);
                     debug_pr("mapping: in %02x out %02x\n", lump_dev->rx_msg[2], lump_dev->rx_msg[3]);
                     debug_pr("Writable: %d\n", lump_dev->mode_info[mode].writable);
 
@@ -855,7 +512,7 @@ static void pbio_port_lump_lump_parse_msg(pbio_port_lump_dev_t *lump_dev) {
             }
             break;
         case LUMP_MSG_TYPE_DATA:
-            if (lump_dev->status != PBDRV_LEGODEV_LUMP_STATUS_DATA) {
+            if (lump_dev->status != PBIO_PORT_LUMP_STATUS_DATA) {
                 debug_pr("Received DATA before INFO was complete\n");
                 goto err;
             }
@@ -877,7 +534,7 @@ static void pbio_port_lump_lump_parse_msg(pbio_port_lump_dev_t *lump_dev) {
                 }
             }
             lump_dev->mode = mode;
-            pbio_port_lump_handle_known_data(lump_dev);
+            pbio_port_lump_device_handle_data(lump_dev);
 
             lump_dev->data_rec = true;
             break;
@@ -886,7 +543,7 @@ static void pbio_port_lump_lump_parse_msg(pbio_port_lump_dev_t *lump_dev) {
     return;
 
 err:
-    lump_dev->status = PBDRV_LEGODEV_LUMP_STATUS_ERR;
+    lump_dev->status = PBIO_PORT_LUMP_STATUS_ERR;
 }
 
 static uint8_t ev3_uart_set_msg_hdr(lump_msg_type_t type, lump_msg_size_t size, lump_cmd_t cmd) {
@@ -959,7 +616,7 @@ static void ev3_uart_prepare_tx_msg(pbio_port_lump_dev_t *lump_dev, lump_msg_typ
  * @param [in]  state          The protothread state.
  * @param [in]  lump_dev       The LEGO UART device instance.
  * @param [in]  uart_dev       The UART device instance.
- * @param [in]  etimer         The timer for the protothread.
+ * @param [in]  timer          The timer for the protothread.
  */
 pbio_error_t pbio_port_lump_sync_thread(pbio_os_state_t *state, pbio_port_lump_dev_t *lump_dev, pbdrv_uart_dev_t *uart_dev, pbio_os_timer_t *timer) {
 
@@ -967,10 +624,7 @@ pbio_error_t pbio_port_lump_sync_thread(pbio_os_state_t *state, pbio_port_lump_d
 
     PBIO_OS_ASYNC_BEGIN(state);
 
-    // Reset whole state except references to static buffers
-    memset((uint8_t *)lump_dev + offsetof(pbio_port_lump_dev_t, type_id), 0, sizeof(pbio_port_lump_dev_t) - offsetof(pbio_port_lump_dev_t, type_id));
-
-    lump_dev->status = PBDRV_LEGODEV_LUMP_STATUS_SYNCING;
+    pbio_port_lump_reset(lump_dev);
 
     // Send SPEED command at 115200 baud
     debug_pr("set baud: %d\n", EV3_UART_SPEED_LPF2);
@@ -1045,14 +699,14 @@ sync:
     // if all was good, we are ready to start receiving the mode info
     lump_dev->type_id = lump_dev->rx_msg[1];
     lump_dev->data_rec = false;
-    lump_dev->status = PBDRV_LEGODEV_LUMP_STATUS_INFO;
+    lump_dev->status = PBIO_PORT_LUMP_STATUS_INFO;
     #if PBIO_CONFIG_PORT_LUMP_MODE_INFO
     lump_dev->info_flags = EV3_UART_INFO_FLAG_CMD_TYPE;
     lump_dev->num_modes = 1;
     #endif
     debug_pr("type id: %d\n", lump_dev->type_id);
 
-    while (lump_dev->status == PBDRV_LEGODEV_LUMP_STATUS_INFO) {
+    while (lump_dev->status == PBIO_PORT_LUMP_STATUS_INFO) {
         // read the message header
         PBIO_OS_AWAIT(state, &lump_dev->read_pt, err = pbdrv_uart_read(&lump_dev->read_pt, uart_dev, lump_dev->rx_msg, 1, EV3_UART_IO_TIMEOUT));
         if (err != PBIO_SUCCESS) {
@@ -1063,10 +717,12 @@ sync:
         lump_dev->rx_msg_size = ev3_uart_get_msg_size(lump_dev->rx_msg[0]);
         if (lump_dev->rx_msg_size > EV3_UART_MAX_MESSAGE_SIZE) {
             debug_pr("Bad message size during info %d\n", lump_dev->rx_msg_size);
+            #if PBIO_CONFIG_PORT_LUMP_EV3
             if (lump_dev->type_id == LEGO_DEVICE_TYPE_ID_EV3_IR_SENSOR) {
                 // This sensor sends bad info messages, but we'll let it pass.
                 continue;
             }
+            #endif
             return err;
         }
 
@@ -1084,7 +740,7 @@ sync:
     }
 
     // at this point we should have read all of the mode info
-    if (lump_dev->status != PBDRV_LEGODEV_LUMP_STATUS_ACK) {
+    if (lump_dev->status != PBIO_PORT_LUMP_STATUS_ACK) {
         return PBIO_ERROR_FAILED;
     }
 
@@ -1104,31 +760,14 @@ sync:
     pbdrv_uart_set_baud_rate(uart_dev, lump_dev->new_baud_rate);
     debug_pr("set baud: %" PRIu32 "\n", lump_dev->new_baud_rate);
 
-    // Request switch to default mode for this device if any.
-    uint8_t default_mode = 0;
-    if (lump_dev->capabilities & LUMP_MODE_FLAGS0_MOTOR_ABS_POS) {
-        default_mode = LEGO_DEVICE_MODE_PUP_ABS_MOTOR__CALIB;
-    } else if (lump_dev->type_id == LEGO_DEVICE_TYPE_ID_INTERACTIVE_MOTOR) {
-        default_mode = LEGO_DEVICE_MODE_PUP_REL_MOTOR__POS;
-    } else if (lump_dev->type_id == LEGO_DEVICE_TYPE_ID_COLOR_DIST_SENSOR) {
-        default_mode = LEGO_DEVICE_MODE_PUP_COLOR_DISTANCE_SENSOR__RGB_I;
-    } else if (lump_dev->type_id == LEGO_DEVICE_TYPE_ID_SPIKE_FORCE_SENSOR) {
-        default_mode = LEGO_DEVICE_MODE_PUP_FORCE_SENSOR__CALIB;
-    } else if (lump_dev->type_id == LEGO_DEVICE_TYPE_ID_SPIKE_COLOR_SENSOR) {
-        default_mode = LEGO_DEVICE_MODE_PUP_COLOR_SENSOR__RGB_I;
-    } else if (lump_dev->type_id == LEGO_DEVICE_TYPE_ID_WEDO2_MOTION_SENSOR) {
-        default_mode = LEGO_DEVICE_MODE_PUP_WEDO2_MOTION_SENSOR__CAL;
-    }
-    if (default_mode) {
-        pbio_port_lump_request_mode(lump_dev, default_mode);
-    }
-
-    // Reset other timers
-    lump_dev->calibration_data[0] = 0;
-    lump_dev->data_set->time = pbdrv_clock_get_ms() - 1000; // i.e. no data set
+    // Pretend the last data was set long ago so it does not delay readiness.
+    lump_dev->data_set->time = pbdrv_clock_get_ms() - 1000;
     lump_dev->data_set->size = 0;
 
-    lump_dev->status = PBDRV_LEGODEV_LUMP_STATUS_DATA;
+    // Now that we know what is attached, prepare its state and default mode.
+    pbio_port_lump_device_init(lump_dev);
+
+    lump_dev->status = PBIO_PORT_LUMP_STATUS_DATA;
 
     PBIO_OS_ASYNC_END(PBIO_SUCCESS);
 }
@@ -1141,7 +780,7 @@ sync:
  * @param [in]  state          The protothread state.
  * @param [in]  lump_dev       The LEGO UART device instance.
  * @param [in]  uart_dev       The UART device instance.
- * @param [in]  etimer         The timer for the protothread.
+ * @param [in]  timer          The timer for the protothread.
  */
 pbio_error_t pbio_port_lump_data_send_thread(pbio_os_state_t *state, pbio_port_lump_dev_t *lump_dev, pbdrv_uart_dev_t *uart_dev, pbio_os_timer_t *timer) {
 
@@ -1224,7 +863,7 @@ pbio_error_t pbio_port_lump_data_send_thread(pbio_os_state_t *state, pbio_port_l
     }
 
 exit:
-    lump_dev->status = PBDRV_LEGODEV_LUMP_STATUS_ERR;
+    lump_dev->status = PBIO_PORT_LUMP_STATUS_ERR;
     PBIO_OS_ASYNC_END(err);
 }
 
@@ -1284,9 +923,11 @@ pbio_error_t pbio_port_lump_data_recv_thread(pbio_os_state_t *state, pbio_port_l
     }
 
 exit:
-    lump_dev->status = PBDRV_LEGODEV_LUMP_STATUS_ERR;
+    lump_dev->status = PBIO_PORT_LUMP_STATUS_ERR;
     PBIO_OS_ASYNC_END(err);
 }
+
+#if PBIO_CONFIG_PORT_LUMP_MODE_INFO
 
 /**
  * Gets the size of a data type.
@@ -1294,7 +935,7 @@ exit:
  * @param [in]  type        The data type
  * @return                  The size of the type or 0 if the type was not valid
  */
-size_t pbio_port_lump_data_size(lump_data_type_t type) {
+static size_t pbio_port_lump_data_size(lump_data_type_t type) {
     switch (type) {
         case LUMP_DATA_TYPE_DATA8:
             return 1;
@@ -1307,6 +948,8 @@ size_t pbio_port_lump_data_size(lump_data_type_t type) {
     return 0;
 }
 
+#endif // PBIO_CONFIG_PORT_LUMP_MODE_INFO
+
 /**
  * Checks if LEGO UART device has data available for reading or is ready to write.
  *
@@ -1317,11 +960,11 @@ size_t pbio_port_lump_data_size(lump_data_type_t type) {
  */
 pbio_error_t pbio_port_lump_is_ready(pbio_port_lump_dev_t *lump_dev) {
 
-    if (!lump_dev || lump_dev->status == PBDRV_LEGODEV_LUMP_STATUS_ERR) {
+    if (!lump_dev || lump_dev->status == PBIO_PORT_LUMP_STATUS_ERR) {
         return PBIO_ERROR_NO_DEV;
     }
 
-    if (lump_dev->status != PBDRV_LEGODEV_LUMP_STATUS_DATA) {
+    if (lump_dev->status != PBIO_PORT_LUMP_STATUS_DATA) {
         return PBIO_ERROR_AGAIN;
     }
 
@@ -1337,12 +980,12 @@ pbio_error_t pbio_port_lump_is_ready(pbio_port_lump_dev_t *lump_dev) {
     }
 
     // Not ready if waiting for stale data to be discarded.
-    if (time - lump_dev->mode_switch.time <= lego_device_stale_data_delay(lump_dev->type_id, lump_dev->mode)) {
+    if (time - lump_dev->mode_switch.time <= pbio_port_lump_device_stale_data_delay(lump_dev)) {
         return PBIO_ERROR_AGAIN;
     }
 
     // Not ready if just recently set new data.
-    if (lump_dev->data_set->size > 0 || time - lump_dev->data_set->time <= lego_device_data_set_delay(lump_dev->type_id, lump_dev->mode)) {
+    if (lump_dev->data_set->size > 0 || time - lump_dev->data_set->time <= pbio_port_lump_device_data_set_delay(lump_dev)) {
         return PBIO_ERROR_AGAIN;
     }
 
@@ -1353,7 +996,6 @@ pbio_error_t pbio_port_lump_is_ready(pbio_port_lump_dev_t *lump_dev) {
  * Starts setting the mode of a LEGO UART device.
  *
  * @param [in]  lump_dev    The LEGO UART device instance.
- * @param [in]  id          The ID of the device to request data from.
  * @param [in]  mode        The mode to set.
  * @return                  ::PBIO_SUCCESS on success or if mode already set.
  *                          ::PBIO_ERROR_NO_DEV if the port does not have a device attached.
@@ -1435,6 +1077,7 @@ pbio_error_t pbio_port_lump_assert_type_id(pbio_port_lump_dev_t *lump_dev, lego_
  * The returned data buffer is 4-byte aligned. Data is in little-endian format.
  *
  * @param [in]  lump_dev    The LEGO UART device instance.
+ * @param [in]  mode        The mode to get data for.
  * @param [out] data        Pointer to hold array of data values.
  * @return                  ::PBIO_SUCCESS on success.
  *                          ::PBIO_ERROR_NO_DEV if the port does not have a device attached.
@@ -1460,6 +1103,7 @@ pbio_error_t pbio_port_lump_get_data(pbio_port_lump_dev_t *lump_dev, uint8_t mod
  * Set data for the current mode.
  *
  * @param [in]  lump_dev    The LEGO UART device instance.
+ * @param [in]  mode        The mode to set the data for.
  * @param [out] data        Data to be set.
  * @param [in]  size        Size of data to be set.
  * @return                  ::PBIO_SUCCESS on success.
@@ -1532,275 +1176,10 @@ pbio_error_t pbio_port_lump_request_reset(pbio_port_lump_dev_t *lump_dev) {
 
     // Forces data threads to exit, and therefore port thread will eventually
     // call sync thread again.
-    lump_dev->status = PBDRV_LEGODEV_LUMP_STATUS_ERR;
+    lump_dev->status = PBIO_PORT_LUMP_STATUS_ERR;
     pbio_os_request_poll();
 
     return PBIO_SUCCESS;
-}
-
-/**
- * Reports the measured color as device independent HSV, the closest match in
- * the color map, and the light intensity.
- */
-static pbsys_telemetry_error_t get_color_telemetry(pbio_port_lump_dev_t *lump_dev, const pbio_color_map_t *color_map, pbsys_telemetry_packet_t *tel, uint32_t *size, bool reflected) {
-
-    pbio_color_t hsv;
-    int32_t intensity;
-    if (pbio_port_lump_get_color(lump_dev, &hsv, reflected) != PBIO_SUCCESS ||
-        pbio_port_lump_get_light_intensity(lump_dev, &intensity, reflected) != PBIO_SUCCESS) {
-        return PBSYS_TELEMETRY_ERROR_NO_REPORT;
-    }
-
-    if (*size < 2 * sizeof(uint32_t) + sizeof(uint8_t)) {
-        return PBSYS_TELEMETRY_ERROR_NO_ROOM;
-    }
-    pbio_set_uint32_le(&tel->payload[0], hsv);
-    pbio_set_uint32_le(&tel->payload[4], color_map ? pbio_color_map_find(color_map, hsv) : PBIO_COLOR_NONE);
-    tel->payload[8] = intensity / 10;
-    *size = 2 * sizeof(uint32_t) + sizeof(uint8_t);
-    return PBSYS_TELEMETRY_SUCCESS;
-}
-
-/**
- * Reports the light intensity for sensors that cannot also measure color in
- * the requested way.
- */
-static pbsys_telemetry_error_t get_light_intensity_telemetry(pbio_port_lump_dev_t *lump_dev, pbsys_telemetry_packet_t *tel, uint32_t *size, bool reflected) {
-
-    int32_t intensity;
-    if (pbio_port_lump_get_light_intensity(lump_dev, &intensity, reflected) != PBIO_SUCCESS) {
-        return PBSYS_TELEMETRY_ERROR_NO_REPORT;
-    }
-
-    if (*size < sizeof(uint8_t)) {
-        return PBSYS_TELEMETRY_ERROR_NO_ROOM;
-    }
-    tel->payload[0] = intensity / 10;
-    *size = sizeof(uint8_t);
-    return PBSYS_TELEMETRY_SUCCESS;
-}
-
-pbsys_telemetry_error_t pbio_port_lump_get_telemetry(pbio_port_lump_dev_t *lump_dev, const pbio_color_map_t *color_map, pbsys_telemetry_packet_t *tel, uint32_t *size) {
-
-    if (pbio_port_lump_is_ready(lump_dev) != PBIO_SUCCESS) {
-        // Leaves size untouched: it is the room still available to the next
-        // generator in this round, not an output until we report success.
-        return PBSYS_TELEMETRY_ERROR_NO_REPORT;
-    }
-
-    tel->id = lump_dev->type_id;
-
-    // Telemetry modes are abstract capabilities rather than LEGO modes, since
-    // not all LEGO modes are functional or meaningfully different.
-    if (lump_dev->type_id == LEGO_DEVICE_TYPE_ID_COLOR_DIST_SENSOR) {
-        switch (lump_dev->mode) {
-            case LEGO_DEVICE_MODE_PUP_COLOR_DISTANCE_SENSOR__RGB_I:
-                tel->mode = 0;
-                return get_color_telemetry(lump_dev, color_map, tel, size, true);
-            case LEGO_DEVICE_MODE_PUP_COLOR_DISTANCE_SENSOR__AMBI:
-                tel->mode = 1;
-                return get_light_intensity_telemetry(lump_dev, tel, size, false);
-            case LEGO_DEVICE_MODE_PUP_COLOR_DISTANCE_SENSOR__PROX:
-                if (*size < sizeof(uint8_t)) {
-                    return PBSYS_TELEMETRY_ERROR_NO_ROOM;
-                }
-                tel->mode = 2;
-                tel->payload[0] = lump_dev->bin_data[0] * 10;
-                *size = sizeof(uint8_t);
-                return PBSYS_TELEMETRY_SUCCESS;
-            default:
-                break;
-        }
-    }
-
-    if (lump_dev->type_id == LEGO_DEVICE_TYPE_ID_SPIKE_COLOR_SENSOR) {
-        switch (lump_dev->mode) {
-            case LEGO_DEVICE_MODE_PUP_COLOR_SENSOR__RGB_I:
-                tel->mode = 0;
-                return get_color_telemetry(lump_dev, color_map, tel, size, true);
-            case LEGO_DEVICE_MODE_PUP_COLOR_SENSOR__SHSV:
-                tel->mode = 1;
-                return get_color_telemetry(lump_dev, color_map, tel, size, false);
-            default:
-                break;
-        }
-    }
-
-    if (lump_dev->type_id == LEGO_DEVICE_TYPE_ID_SPIKE_FORCE_SENSOR && lump_dev->mode == LEGO_DEVICE_MODE_PUP_FORCE_SENSOR__FRAW) {
-        int32_t force;
-        int32_t distance;
-        if (pbio_port_lump_get_force(lump_dev, &force, &distance) == PBIO_SUCCESS) {
-            if (*size < 2 * sizeof(uint16_t)) {
-                return PBSYS_TELEMETRY_ERROR_NO_ROOM;
-            }
-            tel->mode = 0;
-            pbio_set_uint16_le(&tel->payload[0], force);
-            pbio_set_uint16_le(&tel->payload[2], distance);
-            *size = 2 * sizeof(uint16_t);
-            return PBSYS_TELEMETRY_SUCCESS;
-        }
-    }
-
-    if ((lump_dev->type_id == LEGO_DEVICE_TYPE_ID_SPIKE_ULTRASONIC_SENSOR && lump_dev->mode == LEGO_DEVICE_MODE_PUP_ULTRASONIC_SENSOR__DISTL) ||
-        (lump_dev->type_id == LEGO_DEVICE_TYPE_ID_EV3_ULTRASONIC_SENSOR && lump_dev->mode == LEGO_DEVICE_MODE_EV3_ULTRASONIC_SENSOR__DIST_CM)) {
-        if (*size < sizeof(uint16_t)) {
-            return PBSYS_TELEMETRY_ERROR_NO_ROOM;
-        }
-        int16_t distance = *(int16_t *)lump_dev->bin_data;
-        int16_t limit = lump_dev->type_id == LEGO_DEVICE_TYPE_ID_SPIKE_ULTRASONIC_SENSOR ? 2000 : 2550;
-        pbio_set_uint16_le(tel->payload, distance < 0 || distance >= limit ? limit : distance);
-        *size = sizeof(uint16_t);
-        return PBSYS_TELEMETRY_SUCCESS;
-    }
-
-    if (lump_dev->type_id == LEGO_DEVICE_TYPE_ID_WEDO2_MOTION_SENSOR && lump_dev->mode == LEGO_DEVICE_MODE_PUP_WEDO2_MOTION_SENSOR__CAL) {
-        if (*size < 2 * sizeof(uint8_t)) {
-            return PBSYS_TELEMETRY_ERROR_NO_ROOM;
-        }
-        uint16_t raw = *(int16_t *)lump_dev->bin_data;
-        tel->payload[0] = pbio_int_math_bind(1100 / (10 + raw), 0, 100);
-        tel->payload[1] = pbio_int_math_bind(raw / 5, 0, 100);
-        *size = 2 * sizeof(uint8_t);
-        return PBSYS_TELEMETRY_SUCCESS;
-    }
-
-    if (lump_dev->type_id == LEGO_DEVICE_TYPE_ID_WEDO2_TILT_SENSOR && lump_dev->mode == LEGO_DEVICE_MODE_PUP_WEDO2_TILT_SENSOR__ANGLE) {
-        if (*size < 2 * sizeof(uint8_t)) {
-            return PBSYS_TELEMETRY_ERROR_NO_ROOM;
-        }
-        tel->mode = 0;
-        tel->payload[0] = lump_dev->bin_data[0];
-        tel->payload[1] = lump_dev->bin_data[1];
-        *size = 2 * sizeof(uint8_t);
-        return PBSYS_TELEMETRY_SUCCESS;
-    }
-
-    if (lump_dev->type_id == LEGO_DEVICE_TYPE_ID_TECHNIC_COLOR_LIGHT_MATRIX && lump_dev->mode == LEGO_DEVICE_MODE_PUP_COLOR_LIGHT_MATRIX__PIX_O) {
-        if (*size < 9 * sizeof(uint8_t)) {
-            return PBSYS_TELEMETRY_ERROR_NO_ROOM;
-        }
-        tel->mode = 0;
-        // This device reports the rows in the order opposite of setting.
-        memcpy(&tel->payload[0], &lump_dev->bin_data[6], 3);
-        memcpy(&tel->payload[3], &lump_dev->bin_data[3], 3);
-        memcpy(&tel->payload[6], &lump_dev->bin_data[0], 3);
-        *size = 9 * sizeof(uint8_t);
-        return PBSYS_TELEMETRY_SUCCESS;
-    }
-
-    #if PBIO_CONFIG_PORT_LUMP_MODE_INFO
-    if (lump_dev->type_id == LEGO_DEVICE_TYPE_ID_EV3_IR_SENSOR && lump_dev->mode == LEGO_DEVICE_MODE_EV3_INFRARED_SENSOR__PROX) {
-        if (*size < sizeof(uint8_t)) {
-            return PBSYS_TELEMETRY_ERROR_NO_ROOM;
-        }
-        // TODO: Other modes.
-        tel->mode = 0;
-        tel->payload[0] = lump_dev->bin_data[0];
-        *size = sizeof(uint8_t);
-        return PBSYS_TELEMETRY_SUCCESS;
-    }
-
-    if (lump_dev->type_id == LEGO_DEVICE_TYPE_ID_EV3_GYRO_SENSOR && lump_dev->mode == LEGO_DEVICE_MODE_EV3_GYRO_SENSOR__G_A) {
-        if (*size < 2 * sizeof(uint16_t)) {
-            return PBSYS_TELEMETRY_ERROR_NO_ROOM;
-        }
-        int16_t angle = *(int16_t *)&lump_dev->bin_data[0];
-        int16_t speed = *(int16_t *)&lump_dev->bin_data[2];
-        pbio_set_uint16_le(&tel->payload[0], angle);
-        pbio_set_uint16_le(&tel->payload[2], speed);
-        tel->mode = 0;
-        *size = 2 * sizeof(uint16_t);
-        return PBSYS_TELEMETRY_SUCCESS;
-    }
-
-    if (lump_dev->type_id == LEGO_DEVICE_TYPE_ID_EV3_COLOR_SENSOR) {
-        if (*size < sizeof(uint8_t)) {
-            return PBSYS_TELEMETRY_ERROR_NO_ROOM;
-        }
-
-        if (lump_dev->mode == LEGO_DEVICE_MODE_EV3_COLOR_SENSOR__REFLECT) {
-            tel->mode = 0;
-            tel->payload[0] = lump_dev->bin_data[0];
-            *size = sizeof(uint8_t);
-            return PBSYS_TELEMETRY_SUCCESS;
-        }
-
-        if (lump_dev->mode == LEGO_DEVICE_MODE_EV3_COLOR_SENSOR__AMBIENT) {
-            tel->mode = 1;
-            tel->payload[0] = lump_dev->bin_data[0];
-            *size = sizeof(uint8_t);
-            return PBSYS_TELEMETRY_SUCCESS;
-        }
-    }
-
-    #endif // PBIO_CONFIG_PORT_LUMP_MODE_INFO
-
-    // No specific encoding, so return device ID without payload for this mode.
-    tel->mode = 0xFF;
-    *size = 0;
-    return PBSYS_TELEMETRY_SUCCESS;
-}
-
-pbsys_telemetry_error_t pbio_port_lump_set_telemetry_mode(pbio_port_lump_dev_t *lump_dev, pbsys_telemetry_packet_t *tel, uint32_t size) {
-
-    if (pbio_port_lump_is_ready(lump_dev) != PBIO_SUCCESS) {
-        return PBSYS_TELEMETRY_ERROR_NO_REPORT;
-    }
-
-    if (lump_dev->type_id == LEGO_DEVICE_TYPE_ID_COLOR_DIST_SENSOR) {
-        uint8_t mode;
-        switch (tel->mode) {
-            case 0:
-                mode = LEGO_DEVICE_MODE_PUP_COLOR_DISTANCE_SENSOR__RGB_I;
-                break;
-            case 1:
-                mode = LEGO_DEVICE_MODE_PUP_COLOR_DISTANCE_SENSOR__AMBI;
-                break;
-            case 2:
-                mode = LEGO_DEVICE_MODE_PUP_COLOR_DISTANCE_SENSOR__PROX;
-                break;
-            default:
-                return PBSYS_TELEMETRY_ERROR_NO_REPORT;
-        }
-        pbio_port_lump_set_mode(lump_dev, mode);
-        return PBSYS_TELEMETRY_SUCCESS;
-    }
-
-    if (lump_dev->type_id == LEGO_DEVICE_TYPE_ID_SPIKE_COLOR_SENSOR) {
-        uint8_t mode;
-        switch (tel->mode) {
-            case 0:
-                mode = LEGO_DEVICE_MODE_PUP_COLOR_SENSOR__RGB_I;
-                break;
-            case 1:
-                mode = LEGO_DEVICE_MODE_PUP_COLOR_SENSOR__SHSV;
-                break;
-            default:
-                return PBSYS_TELEMETRY_ERROR_NO_REPORT;
-        }
-        pbio_port_lump_set_mode(lump_dev, mode);
-        return PBSYS_TELEMETRY_SUCCESS;
-    }
-
-    #if PBIO_CONFIG_PORT_LUMP_MODE_INFO
-    if (lump_dev->type_id == LEGO_DEVICE_TYPE_ID_EV3_COLOR_SENSOR) {
-        uint8_t mode;
-        switch (tel->mode) {
-            case 0:
-                mode = LEGO_DEVICE_MODE_EV3_COLOR_SENSOR__REFLECT;
-                break;
-            case 1:
-                mode = LEGO_DEVICE_MODE_EV3_COLOR_SENSOR__AMBIENT;
-                break;
-            default:
-                return PBSYS_TELEMETRY_ERROR_NO_REPORT;
-        }
-        pbio_port_lump_set_mode(lump_dev, mode);
-        return PBSYS_TELEMETRY_SUCCESS;
-    }
-    #endif // PBIO_CONFIG_PORT_LUMP_MODE_INFO
-
-    return PBSYS_TELEMETRY_SUCCESS;
 }
 
 #endif // PBIO_CONFIG_PORT_LUMP

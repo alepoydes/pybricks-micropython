@@ -240,8 +240,10 @@ uint32_t pbsys_host_stdin_get_free(void) {
 /**
  * Gets the maximum message size that can be sent to the host on all active
  * connections. Accounts for event byte, so size is the payload.
+ *
+ * @return              The size in bytes.
  */
-static uint32_t pbsys_host_get_max_message_size(void) {
+uint32_t pbsys_host_get_max_message_size(void) {
     // USB limit is configured to allow configured host event size, so poses
     // no additional runtime limit.
     return pbio_int_math_min(pbdrv_bluetooth_get_max_message_size(), PBSYS_CONFIG_HOST_EVENT_OUT_SIZE) - 1;
@@ -433,6 +435,15 @@ bool pbsys_host_get_event_buf(pbsys_host_transport_type_t transport, uint8_t **b
     // Transport drivers may call us early, but we should not yield data
     // until all lower level drivers are ready.
     if (!pbsys_host_initialized) {
+        return false;
+    }
+
+    // REVISIT: Some Bluetooth drivers (cc2640, bluenrg) drop responses to host
+    // commands if we are busy sending events. This needs fixing at the driver
+    // level, but just suppress events while downloading programs for now. This
+    // means that program downloads will not get stuck, but other collisions
+    // like app data and stdout can still lead to missing replies.
+    if (pbsys_status_test(PBIO_PYBRICKS_STATUS_FILE_IO_IN_PROGRESS)) {
         return false;
     }
 

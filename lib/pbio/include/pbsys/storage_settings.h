@@ -21,6 +21,7 @@
 #include <pbio/config.h>
 #include <pbio/error.h>
 #include <pbio/imu.h>
+#include <pbio/port_lump.h>
 #include <pbsys/config.h>
 
 /**
@@ -36,6 +37,10 @@ typedef enum {
      * electronics (defaults to false).
      */
     PBSYS_STORAGE_SETTINGS_FLAGS_SENSOR_POWER_SAFETY_PROMPT_ACCEPTED = (1 << 1),
+    /**
+     * Telemetry begins automatically unless user disabled it.
+     */
+    PBSYS_STORAGE_SETTINGS_FLAGS_TELEMETRY_STARTS_AT_BOOT = (1 << 2),
 } pbsys_storage_settings_flags_t;
 
 /**
@@ -47,9 +52,13 @@ typedef struct _pbsys_storage_settings_t {
     #if PBIO_CONFIG_IMU
     pbio_imu_persistent_settings_t imu_settings;
     #endif
-    #if PBDRV_CONFIG_BLUETOOTH_CLASSIC && PBIO_CONFIG_BLUETOOTH
+    #if PBDRV_CONFIG_BLUETOOTH_CLASSIC_BONDS
     /** Bonding records for Bluetooth Classic devices, most recent first. */
     pbio_bluetooth_classic_link_key_t bluetooth_bonds[PBIO_BLUETOOTH_CLASSIC_NUM_BONDS];
+    #endif
+    #if PBIO_CONFIG_PORT_LUMP_EV3
+    /** EV3 color sensor white balance, for the sensor on each port. */
+    pbio_port_lump_ev3_color_calibration_t ev3_color_calibration[PBIO_CONFIG_PORT_LUMP_NUM_DEV];
     #endif
 } pbsys_storage_settings_t;
 

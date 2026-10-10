@@ -4,7 +4,55 @@
 
 ## [Unreleased]
 
-[Unreleased]: https://github.com/pybricks/pybricks-micropython/compare/v4.1.0b4...HEAD
+[Unreleased]: https://github.com/pybricks/pybricks-micropython/compare/v4.1.0b6...HEAD
+
+## [4.1.0b6] - 2026-10-08
+
+### Fixed
+- Fixed `XboxController` failing to pair on Technic Hub while connected to
+  some computers and tablets ([pybricks-micropython#515]).
+- Fixed Technic Hub and City Hub getting stuck or disconnecting when sending
+  a lot of output, such as printing or sensor telemetry, especially while
+  receiving data ([support#2848]).
+- Fixed Move Hub Hub getting stuck or disconnecting when sending
+  a lot of output, such as printing or sensor telemetry, especially while
+  receiving data ([support#2833]).
+
+### Changed
+- Technic Hub no longer disconnects from the computer when connecting to the
+  `XboxController`. The unofficial `stay_connected` argument has been removed.
+
+[support#2833]: https://github.com/pybricks/support/issues/2833
+[support#2848]: https://github.com/pybricks/support/issues/2848
+[pybricks-micropython#515]: https://github.com/pybricks/pybricks-micropython/pull/515
+[4.1.0b6]: https://github.com/pybricks/pybricks-micropython/compare/v4.1.0b5...v4.1.0b6
+
+## [4.1.0b5] - 2026-10-02
+
+### Added
+- Added `pybricks.messaging.HubNetwork` to EV3, Prime, Inventor, Essential Hub.
+- Added hub info view on EV3 to show firmware and hardware version and address.
+- Added hub name to the top of the screen.
+- Added `hsv()` and `detectable_colors()` to the EV3 Color Sensor.
+- Added EV3 color sensor calibration.
+
+### Fixed
+- Fixed EV3 not using the correct MAC address.
+- Fixed NXT Light Sensor not initializing, which also caused EV3 port view to
+  pause indefinitely.
+- Fixed program downloads sometimes getting stuck on Technic, City, and
+  Move Hubs ([support#2833]).
+- Fixed early inactivity shutdown of EV3 when buttons are pressed.
+- Fixed NXT USB stability issues ([support#2831]).
+
+### Changed
+- When sensor telemetry is paused, keep it paused on next boot.
+- When the firmware is updated, only erase storage if the data map has changed
+  in order to preserve Bluetooth settings most of the time.
+
+[support#2831]: https://github.com/pybricks/support/issues/2831
+[support#2833]: https://github.com/pybricks/support/issues/2833
+
 
 ## [4.1.0b4] - 2026-09-21
 
@@ -45,7 +93,7 @@
 [support#2822]: https://github.com/orgs/pybricks/discussions/2822
 [support#2826]: https://github.com/pybricks/support/issues/2826
 
-[4.1.0b3]: https://github.com/pybricks/pybricks-micropython/compare/v4.1.0b3...v4.1.0b4
+[4.1.0b4]: https://github.com/pybricks/pybricks-micropython/compare/v4.1.0b3...v4.1.0b4
 
 ## [4.1.0b3] - 2026-08-25
 

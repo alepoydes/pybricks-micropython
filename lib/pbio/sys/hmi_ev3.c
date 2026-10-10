@@ -91,6 +91,7 @@ static pbio_error_t run_ui(pbio_os_state_t *state, pbio_os_timer_t *timer) {
 
         DEBUG_PRINT("Start HMI loop\n");
 
+        pbio_os_timer_reset(timer);
         pbsys_hmi_host_update_indications();
 
         pbsys_hmi_ev3_ui_draw();
@@ -173,7 +174,7 @@ static pbio_error_t run_ui(pbio_os_state_t *state, pbio_os_timer_t *timer) {
     // doing that. Established connections are kept.
     pbdrv_bluetooth_inquiry_stop();
     pbdrv_bluetooth_classic_hid_pair_cancel();
-    pbdrv_bluetooth_classic_host_pair_cancel();
+    pbdrv_bluetooth_classic_host_set_discoverable(false);
 
     // Wait for all buttons to be released so the user doesn't accidentally
     // push their robot off course.

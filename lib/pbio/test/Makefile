@@ -42,9 +42,6 @@ TINY_TEST_SRC = $(TINY_TEST_DIR)/tinytest.c
 # pbio dependency
 LEGO_DIR = ../../lego
 LEGO_INC = -I$(LEGO_DIR)
-LEGO_SRC = $(addprefix $(LEGO_DIR)/, \
-	device.c \
-	)
 
 # pbio dependency
 LWRB_DIR = ../../lwrb/src
@@ -106,7 +103,7 @@ BTSTACK_SRC += $(addprefix $(BTSTACK_DIR)/platform/posix/,\
 
 # pbio library
 PBIO_DIR = ..
-PBIO_INC = -I$(PBIO_DIR)/include -I$(PBIO_DIR)
+PBIO_INC = -I$(PBIO_DIR)/include -I$(PBIO_DIR) -I$(PBIO_DIR)/drv/bluetooth
 PBIO_SRC = $(PBIO_DIR)/platform/test/platform.c \
 	$(shell find $(PBIO_DIR)/drv ! -wholename "*/uart_ev3_pru_lib/*" -and ! -wholename "*/stm32_usbd/*" -and -name "*.c") \
 	$(shell find $(PBIO_DIR)/src -name "*.c") \
@@ -162,7 +159,7 @@ ifeq ($(COVERAGE),1)
 CFLAGS += --coverage
 endif
 
-SRC = $(TINY_TEST_SRC) $(LEGO_SRC) $(LWRB_SRC) $(BTSTACK_SRC) $(PBIO_SRC) $(TEST_SRC)
+SRC = $(TINY_TEST_SRC) $(LWRB_SRC) $(BTSTACK_SRC) $(PBIO_SRC) $(TEST_SRC)
 DEP = $(addprefix $(BUILD_PREFIX)/,$(SRC:.c=.d))
 OBJ = $(addprefix $(BUILD_PREFIX)/,$(SRC:.c=.o))
 

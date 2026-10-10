@@ -18,6 +18,8 @@
 
 #include <pbsys/host.h>
 
+#include <pbsys/status.h>
+#include <pbsys/storage_settings.h>
 #include <pbsys/telemetry.h>
 
 // Telemetry output level, controlled by the host via the set level command.
@@ -104,18 +106,38 @@ static bool pbsys_telemetry_iterate_data(pbsys_telemetry_packet_t *tel, uint32_t
         }
 
         // Idle between sequences of samples.
-        PBSYS_TELEMETRY_IDLE(&state, &timer, 40);
+        PBSYS_TELEMETRY_IDLE(&state, &timer, 100);
     }
 
     // Unreachable
     PBIO_OS_ASYNC_END(false);
 }
 
+/**
+ * Gets the largest mode-specific payload that one telemetry message can ever
+ * carry on the currently active connections.
+ *
+ * Generators can use this to decide whether optional data is worth assembling
+ * at all. It says nothing about the room left in the message being filled
+ * right now, which is what the size argument of a generator is for. Payloads
+ * bigger than this never fit, so reporting them as not having room would stall
+ * the generator instead of deferring it.
+ *
+ * @return              The size in bytes, which may be 0.
+ */
+uint32_t pbsys_telemetry_get_max_payload_size(void) {
+    // Each payload is preceded by the event byte, the message size prefix,
+    // and the message header.
+    const uint32_t overhead = sizeof(uint8_t) + sizeof(uint16_t) + PBSYS_TELEMETRY_MSG_HEADER_SIZE;
+    uint32_t max_size = pbsys_host_get_max_message_size();
+    return max_size > overhead ? max_size - overhead : 0;
+}
+
 uint32_t pbsys_telemetry_get_data(uint8_t *data, uint32_t max_size) {
 
     uint32_t next_index = 1;
 
-    if (pbsys_telemetry_level == PBSYS_TELEMETRY_LEVEL_OFF) {
+    if (pbsys_telemetry_level == PBSYS_TELEMETRY_LEVEL_OFF || !pbsys_status_test(PBIO_PYBRICKS_STATUS_TELEMETRY_ACTIVE)) {
         return 0;
     }
 
@@ -163,6 +185,13 @@ pbio_pybricks_error_t pbsys_telemetry_write_data(const uint8_t *data, uint32_t s
                 return PBIO_PYBRICKS_ERROR_VALUE_NOT_ALLOWED;
             }
             pbsys_telemetry_level = data[1];
+            // Host uses status to know activity state, even if never toggled.
+            if (pbsys_telemetry_level) {
+                pbsys_status_set(PBIO_PYBRICKS_STATUS_TELEMETRY_ACTIVE);
+            } else {
+                pbsys_status_clear(PBIO_PYBRICKS_STATUS_TELEMETRY_ACTIVE);
+            }
+            pbsys_storage_settings_set_flag(PBSYS_STORAGE_SETTINGS_FLAGS_TELEMETRY_STARTS_AT_BOOT, !!pbsys_telemetry_level);
             return PBIO_PYBRICKS_ERROR_OK;
         case PBSYS_TELEMETRY_COMMAND_SET_MODE: {
             // Command id followed by one telemetry message: the outgoing
