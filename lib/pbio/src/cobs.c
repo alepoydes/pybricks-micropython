@@ -167,10 +167,17 @@ uint32_t pbio_cobs_decode_prefixed(const uint8_t *src, uint32_t len, uint8_t *pr
     bool has_value;
     uint8_t value;
     uint8_t block;
-    pbio_cobs_unescape(src[read_idx++] ^ PBIO_COBS_XOR, &has_value, &value, &block);
+    uint8_t code = src[read_idx++] ^ PBIO_COBS_XOR;
+    if (code <= PBIO_COBS_MAX_DELIMITER) {
+        return 0;
+    }
+    pbio_cobs_unescape(code, &has_value, &value, &block);
 
     while (read_idx < len) {
         uint8_t byte = src[read_idx++] ^ PBIO_COBS_XOR;
+        if (byte <= PBIO_COBS_MAX_DELIMITER) {
+            return 0;
+        }
 
         if (--block > 0) {
             // Still inside the current block: emit the byte verbatim.
@@ -188,6 +195,12 @@ uint32_t pbio_cobs_decode_prefixed(const uint8_t *src, uint32_t len, uint8_t *pr
             }
         }
         pbio_cobs_unescape(byte, &has_value, &value, &block);
+    }
+
+    // A delimiter cannot complete a truncated block. Without this check a
+    // malformed frame can be accepted as a shorter, otherwise valid command.
+    if (block != 1) {
+        return 0;
     }
 
     // Exclude the prefix from the reported payload length. A prefix-only frame
