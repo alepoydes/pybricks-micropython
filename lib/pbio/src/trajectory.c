@@ -560,14 +560,19 @@ static pbio_error_t pbio_trajectory_new_forward_angle_command(pbio_trajectory_t 
     }
 
     // Get initial approximation of duration.
-    int32_t t3_approx = div_th_by_w(fwd_angle, wt);
+    // Nonzero control speed can round to zero in trajectory units. Also,
+    // an invalid duration can exceed int32 before the range check below.
+    if (wt == 0) {
+        return PBIO_ERROR_INVALID_ARG;
+    }
+    int64_t t3_approx = (int64_t)fwd_angle * 100 / wt;
     if (trj->w0 < 0) {
         // Add time to dissipate initial speed. The case of forward
         // excess speed gets handled below by cutting down speed.
         t3_approx += div_w_by_a(-trj->w0, accel);
     }
     // Return error if maneuver would take too long.
-    if (t3_approx > TIME_MAX) {
+    if (t3_approx >= TIME_MAX) {
         return PBIO_ERROR_INVALID_ARG;
     }
 

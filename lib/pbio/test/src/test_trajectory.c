@@ -372,7 +372,26 @@ static void test_position_trajectory(void *env) {
     }
 }
 
+static void test_rejected_duration(void *env) {
+    pbio_trajectory_command_t command = {
+        .position_end = {.rotations = 2777, .millidegrees = 280000},
+        .speed_target = 1000,
+        .speed_max = 1000000,
+        .acceleration = 2000000,
+        .deceleration = 2000000,
+    };
+    pbio_trajectory_t trajectory;
+    // Fits the angle representation, but its duration exceeds signed int32.
+    tt_want_int_op(pbio_trajectory_new_angle_command(&trajectory, &command), ==, PBIO_ERROR_INVALID_ARG);
+    command.position_end = (pbio_angle_t){.rotations = 1};
+    command.speed_target = 1;
+    tt_want_int_op(pbio_trajectory_new_angle_command(&trajectory, &command), ==, PBIO_ERROR_INVALID_ARG);
+    command.speed_target = 1000;
+    tt_want_int_op(pbio_trajectory_new_angle_command(&trajectory, &command), ==, PBIO_SUCCESS);
+}
+
 struct testcase_t pbio_trajectory_tests[] = {
+    PBIO_TEST(test_rejected_duration),
     PBIO_TEST(test_simple_trajectory),
     PBIO_TEST(test_position_trajectory),
     PBIO_TEST(test_infinite_trajectory),

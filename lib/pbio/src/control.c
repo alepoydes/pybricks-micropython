@@ -498,6 +498,8 @@ void pbio_control_reset(pbio_control_t *ctl) {
 static pbio_error_t _pbio_control_start_position_control(pbio_control_t *ctl, uint32_t time_now, const pbio_control_state_t *state, const pbio_angle_t *target, int32_t speed, pbio_control_on_completion_t on_completion, bool allow_trajectory_shift) {
 
     pbio_error_t err;
+    // A rejected replacement must leave the ongoing maneuver intact.
+    pbio_trajectory_t trajectory;
 
     // Common trajectory parameters for all cases covered here.
     pbio_trajectory_command_t command = {
@@ -518,7 +520,7 @@ static pbio_error_t _pbio_control_start_position_control(pbio_control_t *ctl, ui
         command.speed_start = state->speed;
 
         // With the command fully populated, we can calculate the trajectory.
-        err = pbio_trajectory_new_angle_command(&ctl->trajectory, &command);
+        err = pbio_trajectory_new_angle_command(&trajectory, &command);
         if (err != PBIO_SUCCESS) {
             return err;
         }
@@ -532,7 +534,7 @@ static pbio_error_t _pbio_control_start_position_control(pbio_control_t *ctl, ui
         command.speed_start = ref.speed;
 
         // With the command fully populated, we can calculate the trajectory.
-        err = pbio_trajectory_new_angle_command(&ctl->trajectory, &command);
+        err = pbio_trajectory_new_angle_command(&trajectory, &command);
         if (err != PBIO_SUCCESS) {
             return err;
         }
@@ -553,7 +555,7 @@ static pbio_error_t _pbio_control_start_position_control(pbio_control_t *ctl, ui
         pbio_trajectory_get_last_vertex(&ctl->trajectory, command.time_start, &ref_vertex);
 
         // With the command fully populated, we can calculate the trajectory.
-        err = pbio_trajectory_new_angle_command(&ctl->trajectory, &command);
+        err = pbio_trajectory_new_angle_command(&trajectory, &command);
         if (err != PBIO_SUCCESS) {
             return err;
         }
@@ -562,7 +564,7 @@ static pbio_error_t _pbio_control_start_position_control(pbio_control_t *ctl, ui
         // better than just branching off. Instead, we can adjust the command
         // so it starts from the same point as the previous trajectory. This
         // avoids rounding errors when restarting commands in a tight loop.
-        if (ctl->trajectory.a0 == ref.acceleration && allow_trajectory_shift) {
+        if (trajectory.a0 == ref.acceleration && allow_trajectory_shift) {
 
             // Update command with shifted starting point, equal to ongoing
             // maneuver.
@@ -571,12 +573,14 @@ static pbio_error_t _pbio_control_start_position_control(pbio_control_t *ctl, ui
             command.speed_start = ref_vertex.speed;
 
             // Recalculate the trajectory from the shifted starting point.
-            err = pbio_trajectory_new_angle_command(&ctl->trajectory, &command);
+            err = pbio_trajectory_new_angle_command(&trajectory, &command);
             if (err != PBIO_SUCCESS) {
                 return err;
             }
         }
     }
+
+    ctl->trajectory = trajectory;
 
     // Activate control type and reset integrators if needed.
     pbio_control_set_control_type(ctl, time_now, PBIO_CONTROL_TYPE_POSITION, on_completion);
@@ -707,6 +711,8 @@ pbio_error_t pbio_control_start_position_control_hold(pbio_control_t *ctl, uint3
 pbio_error_t pbio_control_start_timed_control(pbio_control_t *ctl, uint32_t time_now, const pbio_control_state_t *state, uint32_t duration, int32_t speed, pbio_control_on_completion_t on_completion) {
 
     pbio_error_t err;
+    // A rejected replacement must leave the ongoing maneuver intact.
+    pbio_trajectory_t trajectory;
 
     // For timed maneuvers, being "smart" by remembering the position endpoint
     // does nothing useful, so discard it to keep only the passive actuation type.
@@ -731,7 +737,7 @@ pbio_error_t pbio_control_start_timed_control(pbio_control_t *ctl, uint32_t time
         command.speed_start = state->speed;
 
         // With the command fully populated, we can calculate the trajectory.
-        err = pbio_trajectory_new_time_command(&ctl->trajectory, &command);
+        err = pbio_trajectory_new_time_command(&trajectory, &command);
         if (err != PBIO_SUCCESS) {
             return err;
         }
@@ -755,7 +761,7 @@ pbio_error_t pbio_control_start_timed_control(pbio_control_t *ctl, uint32_t time
         pbio_trajectory_get_last_vertex(&ctl->trajectory, command.time_start, &ref_vertex);
 
         // With the command fully populated, we can calculate the trajectory.
-        err = pbio_trajectory_new_time_command(&ctl->trajectory, &command);
+        err = pbio_trajectory_new_time_command(&trajectory, &command);
         if (err != PBIO_SUCCESS) {
             return err;
         }
@@ -764,7 +770,7 @@ pbio_error_t pbio_control_start_timed_control(pbio_control_t *ctl, uint32_t time
         // better than just branching off. Instead, we can adjust the command
         // so it starts from the same point as the previous trajectory. This
         // avoids rounding errors when restarting commands in a tight loop.
-        if (pbio_control_type_is_time(ctl) && ctl->trajectory.a0 == ref.acceleration) {
+        if (pbio_control_type_is_time(ctl) && trajectory.a0 == ref.acceleration) {
 
             // Update command with shifted starting point, equal to ongoing
             // maneuver.
@@ -777,12 +783,14 @@ pbio_error_t pbio_control_start_timed_control(pbio_control_t *ctl, uint32_t time
             command.duration += (time_now - ref_vertex.time);
 
             // Recalculate the trajectory from the shifted starting point.
-            err = pbio_trajectory_new_time_command(&ctl->trajectory, &command);
+            err = pbio_trajectory_new_time_command(&trajectory, &command);
             if (err != PBIO_SUCCESS) {
                 return err;
             }
         }
     }
+
+    ctl->trajectory = trajectory;
 
     // Activate control type and reset integrators if needed.
     pbio_control_set_control_type(ctl, time_now, PBIO_CONTROL_TYPE_TIMED, on_completion);
