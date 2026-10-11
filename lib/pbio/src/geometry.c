@@ -128,8 +128,8 @@ pbio_error_t pbio_geometry_vector_normalize(pbio_geometry_xyz_t *input, pbio_geo
     // Compute the norm.
     float norm = pbio_geometry_vector_norm(input);
 
-    // If the vector norm is zero, do nothing.
-    if (norm == 0.0f) {
+    // Reject invalid directions without changing the output.
+    if (!isfinite(norm) || norm == 0.0f) {
         return PBIO_ERROR_INVALID_ARG;
     }
 

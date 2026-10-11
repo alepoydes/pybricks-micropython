@@ -175,6 +175,12 @@ static pbio_imu_persistent_settings_t *persistent_settings = NULL;
  */
 const float standard_gravity = 9806.65f;
 
+static int16_t threshold_to_raw(float threshold, float scale) {
+    // Clip before converting: finite settings can exceed the integer range.
+    float raw = threshold / scale;
+    return raw < 1 ? 1 : raw > INT16_MAX ? INT16_MAX : (int16_t)raw;
+}
+
 /**
  * Applies (newly set) settings to the driver.
  */
@@ -186,8 +192,8 @@ static void pbio_imu_apply_pbdrv_settings(pbio_imu_persistent_settings_t *settin
         return;
     }
 
-    imu_config->gyro_stationary_threshold = pbio_int_math_bind(settings->gyro_stationary_threshold / imu_config->gyro_scale, 1, INT16_MAX);
-    imu_config->accel_stationary_threshold = pbio_int_math_bind(settings->accel_stationary_threshold / imu_config->accel_scale, 1, INT16_MAX);
+    imu_config->gyro_stationary_threshold = threshold_to_raw(settings->gyro_stationary_threshold, imu_config->gyro_scale);
+    imu_config->accel_stationary_threshold = threshold_to_raw(settings->accel_stationary_threshold, imu_config->accel_scale);
 }
 
 /**
@@ -276,13 +282,8 @@ static void pbio_imu_handle_frame_data_func(int16_t *data) {
         }
         pbio_geometry_quaternion_from_gravity_unit_vector(&g, &quaternion);
         quaternion_initialized = true;
+        pbio_geometry_quaternion_to_rotation_matrix(&quaternion, &pbio_imu_rotation);
     }
-
-    // Compute current orientation matrix to obtain the current heading.
-    pbio_geometry_quaternion_to_rotation_matrix(&quaternion, &pbio_imu_rotation);
-
-    // Projects application x-axis into the inertial frame to compute the heading.
-    update_heading_projection();
 
     for (uint8_t i = 0; i < PBIO_ARRAY_SIZE(angular_velocity_calibrated.values); i++) {
         // Update angular velocity and acceleration cache so user can read them.
@@ -356,6 +357,10 @@ static void pbio_imu_handle_frame_data_func(int16_t *data) {
         quaternion.values[i] += dq.values[i] * imu_config->sample_time;
     }
     pbio_geometry_quaternion_normalize(&quaternion);
+
+    // Publish the orientation of this integration step, not the previous one.
+    pbio_geometry_quaternion_to_rotation_matrix(&quaternion, &pbio_imu_rotation);
+    update_heading_projection();
 }
 
 // This counter is a measure for calibration accuracy, roughly equivalent
@@ -465,7 +470,7 @@ bool pbio_imu_is_stationary(void) {
 static bool pbio_imu_stationary_acceleration_out_of_range(float value, bool expect_positive) {
     const float expected_value = expect_positive ? standard_gravity : -standard_gravity;
     const float absolute_error = value > expected_value ? value - expected_value : expected_value - value;
-    return absolute_error > standard_gravity / 10;
+    return !isfinite(value) || absolute_error > standard_gravity / 10;
 }
 
 /**
@@ -492,29 +497,48 @@ static bool pbio_imu_setting_close_to_360(float value) {
  */
 pbio_error_t pbio_imu_set_settings(pbio_imu_persistent_settings_t *new_settings) {
 
-    // Can't set settings if storage not loaded.
+    // Settings must be bound before they can be read or changed.
     if (!persistent_settings) {
         return PBIO_ERROR_FAILED;
     }
 
+    const uint32_t supported = PBIO_IMU_SETTINGS_FLAGS_ACCEL_STATIONARY_THRESHOLD_SET |
+        PBIO_IMU_SETTINGS_FLAGS_GYRO_STATIONARY_THRESHOLD_SET |
+        PBIO_IMU_SETTINGS_FLAGS_GYRO_BIAS_INITIAL_SET | PBIO_IMU_SETTINGS_FLAGS_GYRO_SCALE_SET |
+        PBIO_IMU_SETTINGS_FLAGS_ACCEL_CALIBRATED | PBIO_IMU_SETTINGS_FLAGS_HEADING_CORRECTION_1D_SET;
+    if (!new_settings || (new_settings->flags & ~supported)) {
+        return PBIO_ERROR_INVALID_ARG;
+    }
+    // Validate a candidate before mutating any live value.
+    pbio_imu_persistent_settings_t candidate = *persistent_settings;
+
     if (new_settings->flags & PBIO_IMU_SETTINGS_FLAGS_ACCEL_STATIONARY_THRESHOLD_SET) {
-        persistent_settings->accel_stationary_threshold = new_settings->accel_stationary_threshold;
+        if (!isfinite(new_settings->accel_stationary_threshold) || new_settings->accel_stationary_threshold < 0) {
+            return PBIO_ERROR_INVALID_ARG;
+        }
+        candidate.accel_stationary_threshold = new_settings->accel_stationary_threshold;
     }
 
     if (new_settings->flags & PBIO_IMU_SETTINGS_FLAGS_GYRO_STATIONARY_THRESHOLD_SET) {
-        persistent_settings->gyro_stationary_threshold = new_settings->gyro_stationary_threshold;
+        if (!isfinite(new_settings->gyro_stationary_threshold) || new_settings->gyro_stationary_threshold < 0) {
+            return PBIO_ERROR_INVALID_ARG;
+        }
+        candidate.gyro_stationary_threshold = new_settings->gyro_stationary_threshold;
     }
 
     for (uint8_t i = 0; i < 3; i++) {
         if (new_settings->flags & PBIO_IMU_SETTINGS_FLAGS_GYRO_BIAS_INITIAL_SET) {
-            persistent_settings->angular_velocity_bias_start.values[i] = new_settings->angular_velocity_bias_start.values[i];
+            if (!isfinite(new_settings->angular_velocity_bias_start.values[i])) {
+                return PBIO_ERROR_INVALID_ARG;
+            }
+            candidate.angular_velocity_bias_start.values[i] = new_settings->angular_velocity_bias_start.values[i];
         }
 
         if (new_settings->flags & PBIO_IMU_SETTINGS_FLAGS_GYRO_SCALE_SET) {
             if (!pbio_imu_setting_close_to_360(new_settings->angular_velocity_scale.values[i])) {
                 return PBIO_ERROR_INVALID_ARG;
             }
-            persistent_settings->angular_velocity_scale.values[i] = new_settings->angular_velocity_scale.values[i];
+            candidate.angular_velocity_scale.values[i] = new_settings->angular_velocity_scale.values[i];
         }
     }
 
@@ -527,27 +551,24 @@ pbio_error_t pbio_imu_set_settings(pbio_imu_persistent_settings_t *new_settings)
             pbio_imu_stationary_acceleration_out_of_range(new_settings->gravity_neg.z, false)) {
             return PBIO_ERROR_INVALID_ARG;
         }
-        persistent_settings->gravity_pos = new_settings->gravity_pos;
-        persistent_settings->gravity_neg = new_settings->gravity_neg;
+        candidate.gravity_pos = new_settings->gravity_pos;
+        candidate.gravity_neg = new_settings->gravity_neg;
     }
 
     if (new_settings->flags & PBIO_IMU_SETTINGS_FLAGS_HEADING_CORRECTION_1D_SET) {
         if (!pbio_imu_setting_close_to_360(new_settings->heading_correction_1d)) {
             return PBIO_ERROR_INVALID_ARG;
         }
-        persistent_settings->heading_correction_1d = new_settings->heading_correction_1d;
+        candidate.heading_correction_1d = new_settings->heading_correction_1d;
     }
 
-    // If any settings were changed, request saving.
+    candidate.flags |= new_settings->flags;
+    *persistent_settings = candidate;
+
+    pbio_imu_apply_pbdrv_settings(persistent_settings);
     if (new_settings->flags) {
-        persistent_settings->flags |= new_settings->flags;
         pbsys_storage_request_write();
     }
-
-    // The persistent settings have now been updated as applicable. Use the
-    // complete set of settings and apply them to the driver.
-    pbio_imu_apply_pbdrv_settings(persistent_settings);
-
     return PBIO_SUCCESS;
 }
 
@@ -650,15 +671,15 @@ pbio_geometry_side_t pbio_imu_get_up_side(bool calibrated) {
     // This is either the raw acceleration or the third row of the fused
     // rotation matrix.
 
-    pbio_geometry_xyz_t *vector = &acceleration_uncalibrated;
+    pbio_geometry_xyz_t vector = acceleration_uncalibrated;
     if (calibrated) {
         // This is similar to pbio_imu_get_tilt_vector, but this should stay
         // in the hub frame rather than projected into user frame.
-        vector->x = pbio_imu_rotation.m31;
-        vector->y = pbio_imu_rotation.m32;
-        vector->z = pbio_imu_rotation.m33;
+        vector.x = pbio_imu_rotation.m31;
+        vector.y = pbio_imu_rotation.m32;
+        vector.z = pbio_imu_rotation.m33;
     }
-    return pbio_geometry_side_from_vector(vector);
+    return pbio_geometry_side_from_vector(&vector);
 }
 
 static float heading_offset_1d = 0;
