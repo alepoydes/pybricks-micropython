@@ -18,7 +18,8 @@
 #if MICROPY_PY_BUILTINS_FLOAT
 mp_int_t pb_obj_get_int(mp_obj_t arg) {
     if (mp_obj_is_float(arg)) {
-        return (mp_int_t)mp_obj_get_float(arg);
+        // MicroPython checks NaN, infinity and integer range before conversion.
+        return mp_obj_get_int(mp_obj_new_int_from_float(mp_obj_get_float(arg)));
     }
     return mp_obj_get_int(arg);
 }
