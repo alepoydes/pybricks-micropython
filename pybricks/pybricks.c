@@ -110,6 +110,10 @@ static const mp_rom_map_elem_t pybricks_globals_table[] = {
     #endif
     #if PYBRICKS_PY_TOOLS
     { MP_ROM_QSTR(MP_QSTR_tools), MP_ROM_PTR(&pb_module_tools) },
+    #if MICROPY_PY_BUILTINS_FLOAT
+    // Keep the legacy alias when using MicroPython builtin subpackages.
+    { MP_ROM_QSTR(MP_QSTR_geometry), MP_ROM_PTR(&pb_module_tools) },
+    #endif
     #endif
     #if PYBRICKS_PY_ROBOTICS
     { MP_ROM_QSTR(MP_QSTR_robotics), MP_ROM_PTR(&pb_module_robotics) },
