@@ -174,10 +174,8 @@ void pbio_angle_from_low_res(pbio_angle_t *a, int32_t input, int32_t scale) {
         return;
     }
 
-    // Get whole rotations.
-    a->rotations = input / (MDEG_PER_ROT / scale);
-
-    // The round off is the truncated part in user units.
-    // We'll keep that portion in the millidegrees component.
-    a->millidegrees = input * scale - a->rotations * MDEG_PER_ROT;
+    // Normalize the full scaled value without overflowing either component.
+    int64_t product = (int64_t)input * scale;
+    a->rotations = product / MDEG_PER_ROT;
+    a->millidegrees = product % MDEG_PER_ROT;
 }

@@ -94,8 +94,35 @@ static void test_scaling(void *env) {
     test_scale(2046); // Medium drive base heading control: 2046 mdeg = 1deg
 }
 
+static void test_from_low_res_large_input(void *env) {
+    pbio_angle_t angle;
+
+    pbio_angle_from_low_res(&angle, INT32_MAX, 2046);
+    tt_want_int_op(angle.rotations, ==, 12204865);
+    tt_want_int_op(angle.millidegrees, ==, 141762);
+
+    pbio_angle_from_low_res(&angle, INT32_MIN, 2046);
+    tt_want_int_op(angle.rotations, ==, -12204865);
+    tt_want_int_op(angle.millidegrees, ==, -143808);
+
+    pbio_angle_from_low_res(&angle, INT32_MAX, 360000);
+    tt_want_int_op(angle.rotations, ==, INT32_MAX);
+    tt_want_int_op(angle.millidegrees, ==, 0);
+
+    pbio_angle_from_low_res(&angle, 1, 1);
+    tt_want_int_op(angle.rotations, ==, 0);
+    tt_want_int_op(angle.millidegrees, ==, 1);
+
+    // Unsupported scales leave the existing angle untouched.
+    pbio_angle_from_low_res(&angle, 1, 0);
+    pbio_angle_from_low_res(&angle, 1, 360001);
+    tt_want_int_op(angle.rotations, ==, 0);
+    tt_want_int_op(angle.millidegrees, ==, 1);
+}
+
 struct testcase_t pbio_angle_tests[] = {
     PBIO_TEST(test_rounding),
     PBIO_TEST(test_scaling),
+    PBIO_TEST(test_from_low_res_large_input),
     END_OF_TESTCASES
 };
