@@ -3,9 +3,7 @@
 
 #include "py/mpconfig.h"
 
-#include <inttypes.h>
 #include <math.h>
-#include <stdio.h>
 #include <string.h>
 
 #include <pybricks/tools/pb_type_matrix.h>
@@ -78,102 +76,20 @@ static mp_obj_t pb_type_Matrix_make_new(const mp_obj_type_t *type, size_t n_args
     return MP_OBJ_FROM_PTR(self);
 }
 
-// Get string representation of the form -123.456
-static void print_float(char *buf, float x) {
-
-    // Convert to positive int
-    int32_t val = (int32_t)(x * 1000);
-    bool negative = val < 0;
-    if (negative) {
-        val = -val;
-    }
-
-    // Limit to 999.999
-    if (val >= 999999) {
-        val = 999999;
-    }
-
-    // Get number of printed digits so we know where to add minus sign later
-    int32_t c = snprintf(NULL, 0, "%" PRId32, val);
-
-    // Print the integer
-    snprintf(buf, 8, "%7" PRId32, val);
-
-    // If the number was negative, add minus sign in the right place
-    if (negative) {
-        buf[6 - c <= 2 ? 6 - c : 2] = '-';
-    }
-
-    // If there is nothing before the decimal, ensure there is a zero
-    buf[3] = buf[3] == ' ' ? '0' : buf[3];
-
-    // Shift last 3 digits to make room for decimal point and insert 0 if empty
-    buf[7] = buf[6] == ' ' ? '0' : buf[6];
-    buf[6] = buf[5] == ' ' ? '0' : buf[5];
-    buf[5] = buf[4] == ' ' ? '0' : buf[4];
-
-    // Terminate and add decimal separator
-    buf[4] = '.';
-}
-
 // pybricks.tools.Matrix.__repr__
 void pb_type_Matrix_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kind_t kind) {
-
-    // Print class name
-    mp_print_str(print, "Matrix([\n");
-
     pb_type_Matrix_obj_t *self = MP_OBJ_TO_PTR(self_in);
-
-    // Each "-123.456" is 8 chars. Each digit is appended with ", " or "]," so
-    // 10 per digit. Each row starts with "    [" and ends with "\n" so we
-    // add 6*rows. Plus 1 for null terminator.
-    size_t len = self->m * self->n * 10 + self->m * 6 + 1;
-
-    // Allocate the buffer
-    char *buf = m_new(char, len);
-
-    // Loop through the rows
+    mp_print_str(print, "Matrix([\n");
     for (size_t r = 0; r < self->m; r++) {
-
-        // Character starting index for this row
-        size_t row_start = r * (self->n * 10 + 6);
-
-        // Start row with "    ["
-        strcpy(buf + row_start, "    [");
-
-        // Loop through the columns, so the scalars in each row
+        mp_print_str(print, "    [");
         for (size_t c = 0; c < self->n; c++) {
-
-            // Starting character index for this column
-            size_t col_start = row_start + c * 10 + 5;
-
-            // Get data index of the scalar we will print. Transposed attribute
-            // tells us whether data is stored row by row or column by column.
-            // (i, j) -> index:
-            // regular:    i * self->n + j
-            // transposed: j * self->m + i
             size_t idx = self->transposed ? c * self->m + r : r * self->n + c;
-
-            // Get character representation of said value
-            print_float(buf + col_start, self->data[idx] * self->scale);
-
-            // Append ", " or "]," after the last value
-            if (c < self->n - 1) {
-                buf[col_start + 8] = ',';
-                buf[col_start + 9] = ' ';
-            } else {
-                buf[col_start + 8] = ']';
-                buf[col_start + 9] = ',';
-            }
+            // Keep aligned columns without clipping IMU values or converting
+            // nonfinite/large floats to integers. Stream without a matrix buffer.
+            mp_print_float(print, self->data[idx] * self->scale, 'f', 0, ' ', 8, 3);
+            mp_print_str(print, c + 1 < self->n ? ", " : "],\n");
         }
-        // New line at end of row
-        buf[row_start + self->n * 10 + 5] = '\n';
     }
-    // Terminate string
-    buf[len - 1 ] = '\0';
-
-    // Send the buffer to MicroPython
-    mp_print_str(print, buf);
     mp_print_str(print, "])");
 }
 
@@ -478,18 +394,11 @@ static mp_obj_t pb_type_Matrix_it_iternext(mp_obj_t self_in) {
     pb_type_Matrix_obj_t *matrix = MP_OBJ_TO_PTR(self->matrix);
 
     if (self->cur < matrix->m * matrix->n) {
-        return mp_obj_new_float_from_f(matrix->data[self->cur++] * matrix->scale);
-    }
-
-    return MP_OBJ_STOP_ITERATION;
-}
-
-static mp_obj_t pb_type_Matrix_it_iterprev(mp_obj_t self_in) {
-    pb_type_Matrix_it_t *self = MP_OBJ_TO_PTR(self_in);
-    pb_type_Matrix_obj_t *matrix = MP_OBJ_TO_PTR(self->matrix);
-
-    if (self->cur > 0) {
-        return mp_obj_new_float_from_f(matrix->data[--self->cur] * matrix->scale);
+        size_t index = self->cur++;
+        if (matrix->transposed) {
+            index = (index % matrix->n) * matrix->m + index / matrix->n;
+        }
+        return mp_obj_new_float_from_f(matrix->data[index] * matrix->scale);
     }
 
     return MP_OBJ_STOP_ITERATION;
@@ -502,13 +411,8 @@ static mp_obj_t pb_type_Matrix_getiter(mp_obj_t o_in, mp_obj_iter_buf_t *iter_bu
     matrix_it->base.type = &mp_type_polymorph_iter;
     matrix_it->matrix = MP_OBJ_FROM_PTR(matrix);
 
-    if (matrix->transposed) {
-        matrix_it->iternext = pb_type_Matrix_it_iterprev;
-        matrix_it->cur = matrix->m * matrix->n;
-    } else {
-        matrix_it->iternext = pb_type_Matrix_it_iternext;
-        matrix_it->cur = 0;
-    }
+    matrix_it->iternext = pb_type_Matrix_it_iternext;
+    matrix_it->cur = 0;
 
     return MP_OBJ_FROM_PTR(matrix_it);
 }
