@@ -46,6 +46,7 @@ typedef struct {
 // Cancel all tasks by calling their close methods.
 static mp_obj_t pb_type_Task_close(mp_obj_t self_in) {
     pb_type_Task_obj_t *self = MP_OBJ_TO_PTR(self_in);
+    void *first_error = NULL;
     for (size_t i = 0; i < self->num_tasks; i++) {
         pb_type_Task_progress_t *task = &self->tasks[i];
 
@@ -54,12 +55,23 @@ static mp_obj_t pb_type_Task_close(mp_obj_t self_in) {
             continue;
         }
 
-        // Find close() on coroutine object, then call it.
-        mp_obj_t dest[2];
-        mp_load_method_maybe(task->arg, MP_QSTR_close, dest);
-        if (dest[0] != MP_OBJ_NULL) {
-            mp_call_method_n_kw(0, 0, dest);
+        // Finish every cancellation even if one close() raises. Mark the task
+        // first so a failed or recursive close does not cancel it twice.
+        task->done = true;
+        nlr_buf_t nlr;
+        if (nlr_push(&nlr) == 0) {
+            mp_obj_t dest[2];
+            mp_load_method_maybe(task->arg, MP_QSTR_close, dest);
+            if (dest[0] != MP_OBJ_NULL) {
+                mp_call_method_n_kw(0, 0, dest);
+            }
+            nlr_pop();
+        } else if (!first_error) {
+            first_error = nlr.ret_val;
         }
+    }
+    if (first_error) {
+        nlr_jump(first_error);
     }
     return mp_const_none;
 }
@@ -124,8 +136,12 @@ static mp_obj_t pb_type_Task_iternext(mp_obj_t self_in) {
         }
         return mp_make_stop_iteration(mp_obj_new_tuple(self->num_tasks, ret));
     } else {
-        // On failure of one task, cancel others, then stop iterating collection by re-raising.
-        pb_type_Task_close(self_in);
+        // Preserve the operation's error if cancellation also raises.
+        nlr_buf_t close_nlr;
+        if (nlr_push(&close_nlr) == 0) {
+            pb_type_Task_close(self_in);
+            nlr_pop();
+        }
         nlr_jump(nlr.ret_val);
     }
 }

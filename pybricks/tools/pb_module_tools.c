@@ -173,11 +173,12 @@ static mp_obj_t pb_module_tools_run_task(size_t n_args, const mp_obj_t *pos_args
     }
 
     mp_obj_iter_buf_t iter_buf;
+    volatile mp_obj_t iterable = MP_OBJ_NULL;
     nlr_buf_t nlr;
 
     if (nlr_push(&nlr) == 0) {
         run_loop_is_active = true;
-        mp_obj_t iterable = mp_getiter(task_in, &iter_buf);
+        iterable = mp_getiter(task_in, &iter_buf);
         while (mp_iternext(iterable) != MP_OBJ_STOP_ITERATION) {
             // Keep running system processes.
             MICROPY_VM_HOOK_LOOP
@@ -187,6 +188,18 @@ static mp_obj_t pb_module_tools_run_task(size_t n_args, const mp_obj_t *pos_args
         nlr_pop();
         run_loop_is_active = false;
     } else {
+        // An interrupt can arrive between iterations, outside the task's own
+        // exception handler. Close it before leaving the async context, while
+        // preserving the original error if cleanup raises too.
+        nlr_buf_t close_nlr;
+        if (iterable != MP_OBJ_NULL && nlr_push(&close_nlr) == 0) {
+            mp_obj_t dest[2];
+            mp_load_method_maybe(iterable, MP_QSTR_close, dest);
+            if (dest[0] != MP_OBJ_NULL) {
+                mp_call_method_n_kw(0, 0, dest);
+            }
+            nlr_pop();
+        }
         run_loop_is_active = false;
         nlr_jump(nlr.ret_val);
     }
