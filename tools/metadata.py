@@ -9,6 +9,8 @@ Generates a .json file with information about a Pybricks firmware binary blob.
 
 Use --no-custom-name for images without a patchable hub name. If the platform
 also needs no checksum, the linker map is not inspected for Pybricks sections.
+For sum-checksummed images with another linker layout, --checksum-size supplies
+the checked flash span without requiring Pybricks sections in the map.
 
 The manifest carries the shared identity of the firmware at the top level and one
 or more architecture variants under the "variants" key. Each variant corresponds to
@@ -118,6 +120,7 @@ def generate(
     out_file: io.FileIO,
     elf_file: io.FileIO = None,
     customize_name: bool = True,
+    checksum_size: int | None = None,
 ):
     if platform not in PLATFORM_INFO:
         print("Unknown platform", file=sys.stderr)
@@ -125,6 +128,16 @@ def generate(
 
     platform_info = PLATFORM_INFO[platform]
     device_id = platform_info["device-id"]
+
+    if checksum_size is not None:
+        if customize_name or platform_info["checksum-type"] != "sum":
+            raise ValueError(
+                "--checksum-size requires --no-custom-name and a sum-checksummed platform"
+            )
+        if checksum_size < 4 or checksum_size % 4:
+            raise ValueError(
+                "--checksum-size must be a positive multiple of four bytes"
+            )
 
     metadata = {
         "metadata-version": VERSION,
@@ -139,7 +152,11 @@ def generate(
         "checksum-type": platform_info["checksum-type"],
     }
 
-    if device_id == 0xE0 or (
+    if checksum_size is not None:
+        variant["checksum-size"] = checksum_size
+        variant["hub-name-offset"] = 0
+        variant["hub-name-size"] = 0
+    elif device_id == 0xE0 or (
         not customize_name and platform_info["checksum-type"] == "none"
     ):
         # No image patching is needed. Setting to 0 ignores name on flashing.
@@ -271,13 +288,23 @@ if __name__ == "__main__":
         dest="customize_name",
         help="generate metadata for firmware without a patchable hub name",
     )
+    parser.add_argument(
+        "--checksum-size",
+        type=lambda value: int(value, 0),
+        metavar="<bytes>",
+        help="sum-checksummed flash span with --no-custom-name; accepts decimal or 0x hex",
+    )
 
     args = parser.parse_args()
-    generate(
-        args.fw_version,
-        args.platform,
-        args.map_file,
-        args.out_file,
-        args.elf,
-        args.customize_name,
-    )
+    try:
+        generate(
+            args.fw_version,
+            args.platform,
+            args.map_file,
+            args.out_file,
+            args.elf,
+            args.customize_name,
+            args.checksum_size,
+        )
+    except ValueError as error:
+        parser.error(str(error))

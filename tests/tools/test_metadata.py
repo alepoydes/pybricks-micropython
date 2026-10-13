@@ -17,7 +17,7 @@ from firmware import create_firmware_blob
 
 
 class MetadataTest(unittest.TestCase):
-    def generate(self, platform, linker_map, *options):
+    def run_generator(self, platform, linker_map, *options):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
             map_file = directory / "firmware.map"
@@ -37,8 +37,12 @@ class MetadataTest(unittest.TestCase):
                 text=True,
                 check=False,
             )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            return out_file.read_text()
+            return result, out_file.read_text()
+
+    def generate(self, platform, linker_map, *options):
+        result, output = self.run_generator(platform, linker_map, *options)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return output
 
     def unpack(self, metadata, image, name=None):
         archive = io.BytesIO()
@@ -82,6 +86,58 @@ class MetadataTest(unittest.TestCase):
         words = [int.from_bytes(blob[i : i + 4], "little") for i in range(0, 32, 4)]
         self.assertEqual(sum(words) & 0xFFFFFFFF, 0)
         self.assertEqual(json.loads(metadata)["variants"][0]["hub-name-size"], 0)
+
+    def test_explicit_sum_checksum_without_pybricks_map_sections(self):
+        metadata = self.generate(
+            "technic_hub",
+            "Zephyr map with no Pybricks sections\n",
+            "--no-custom-name",
+            "--checksum-size",
+            "0x20",
+        )
+        variant = json.loads(metadata)["variants"][0]
+        self.assertEqual(variant["checksum-size"], 32)
+        self.assertEqual(variant["hub-name-offset"], 0)
+        self.assertEqual(variant["hub-name-size"], 0)
+
+        image = bytes(range(12))
+        blob = self.unpack(metadata, image)["technic_hub"]
+        self.assertEqual(blob[:12], image)
+        self.assertEqual(len(blob), 16)
+        erased_tail = blob + b"\xff" * (32 - len(blob))
+        words = [
+            int.from_bytes(erased_tail[i : i + 4], "little") for i in range(0, 32, 4)
+        ]
+        self.assertEqual(sum(words) & 0xFFFFFFFF, 0)
+
+    def test_explicit_sum_checksum_rejects_invalid_options(self):
+        for platform, options, message in (
+            ("technic_hub", ("--checksum-size", "32"), "--no-custom-name"),
+            (
+                "prime_hub_f4",
+                ("--no-custom-name", "--checksum-size", "32"),
+                "sum-checksummed",
+            ),
+            (
+                "technic_hub",
+                ("--no-custom-name", "--checksum-size", "0"),
+                "multiple of four",
+            ),
+            (
+                "technic_hub",
+                ("--no-custom-name", "--checksum-size", "6"),
+                "multiple of four",
+            ),
+            (
+                "technic_hub",
+                ("--no-custom-name", "--checksum-size=-4"),
+                "multiple of four",
+            ),
+        ):
+            with self.subTest(platform=platform, options=options):
+                result, _ = self.run_generator(platform, "", *options)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
 
 
 if __name__ == "__main__":
