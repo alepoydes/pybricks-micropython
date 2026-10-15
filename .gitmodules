@@ -1,6 +1,6 @@
 [submodule "micropython"]
 	path = micropython
-	url = https://github.com/pybricks/micropython
+	url = https://github.com/alepoydes/micropython.git
 	branch = pybricks-v3.x
 [submodule "lib/btstack"]
 	path = lib/btstack
